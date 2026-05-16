@@ -10,14 +10,11 @@ import io
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import pdfplumber
 from pdf2image import convert_from_bytes
 from PIL import Image
-
-# Limiar mínimo de caracteres por página para considerar o PDF como "com texto"
-_LIMIAR_CHARS_POR_PAGINA = 50
 
 
 @dataclass
@@ -46,15 +43,8 @@ def extrair_conteudo_pdf(caminho: str | Path) -> ConteudoPDF:
             total_paginas=1,
         )
 
-    # PDF
+    # PDF — always convert pages to images for the image extraction pipeline
     total = _contar_paginas(caminho)
-    texto = _extrair_texto(caminho)
-    chars_por_pagina = len(texto) / max(total, 1)
-
-    if chars_por_pagina >= _LIMIAR_CHARS_POR_PAGINA:
-        return ConteudoPDF(texto=texto, imagens=[], total_paginas=total)
-
-    # PDF escaneado: converte para imagens
     imagens = _pdf_para_imagens(caminho)
     return ConteudoPDF(texto="", imagens=imagens, total_paginas=total)
 
@@ -79,27 +69,6 @@ def _contar_paginas(caminho: Path) -> int:
             return len(pdf.pages)
     except Exception:
         return 0
-
-
-def _extrair_texto(caminho: Path) -> str:
-    """Extrai texto completo usando pdfplumber (tabelas + texto corrido)."""
-    partes: List[str] = []
-    try:
-        with pdfplumber.open(caminho) as pdf:
-            for pagina in pdf.pages:
-                # Tenta extrair tabelas primeiro para preservar estrutura
-                tabelas = pagina.extract_tables()
-                if tabelas:
-                    for tabela in tabelas:
-                        for linha in tabela:
-                            celulas = [c or "" for c in linha]
-                            partes.append("\t".join(celulas))
-                texto_pagina = pagina.extract_text() or ""
-                if texto_pagina.strip():
-                    partes.append(texto_pagina)
-    except Exception:
-        pass
-    return "\n".join(partes)
 
 
 def _pdf_para_imagens(caminho: Path, dpi: int = 150) -> List[Tuple[int, bytes]]:
