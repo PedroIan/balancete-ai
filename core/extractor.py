@@ -138,9 +138,14 @@ def bytes_para_b64(dados: bytes) -> str:
 
 def ocr_com_tesseract(img_bytes: bytes) -> Tuple[str, float]:
     """
-    Tenta OCR com Tesseract (idioma: por) após pré-processamento OpenCV.
-    Retorna (texto, confianca) com confianca em 0–100.
-    Retorna ("", 0.0) se Tesseract ou OpenCV não estiverem instalados — sem erros.
+    Tenta OCR com Tesseract usando múltiplas estratégias de pré-processamento.
+    Retorna (texto, confiança) da estratégia com maior confiança — confiança em 0–100.
+    Retorna ("", 0.0) se Tesseract ou OpenCV não estiverem instalados.
+
+    Pipeline:
+    1. Upscala para mínimo de 2000px no lado maior (Tesseract precisa de ~300 DPI)
+    2. Testa 3 binarizações: Otsu, Adaptativa Gaussiana, CLAHE+Otsu
+    3. Retorna o resultado com maior confiança média por palavra
     """
     try:
         import cv2
@@ -150,35 +155,65 @@ def ocr_com_tesseract(img_bytes: bytes) -> Tuple[str, float]:
         return ("", 0.0)
 
     try:
-        # Decodifica bytes → array OpenCV
         arr = np.frombuffer(img_bytes, dtype=np.uint8)
         img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
         if img is None:
             return ("", 0.0)
 
-        # Pré-processamento: escala de cinza + binarização adaptativa
         cinza = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        binario = cv2.adaptiveThreshold(
-            cinza, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
+
+        # Upscaling: Tesseract funciona melhor com imagens equivalentes a ≥ 300 DPI.
+        # Páginas A4 a 150 DPI têm ~1240px no lado menor — abaixo do ideal.
+        h, w = cinza.shape
+        lado_maior = max(h, w)
+        if lado_maior < 2000:
+            fator = max(2, int(2000 / lado_maior) + 1)
+            cinza = cv2.resize(cinza, (w * fator, h * fator), interpolation=cv2.INTER_CUBIC)
+
+        # Estratégia 1 — Otsu: bom para documentos de alto contraste e iluminação uniforme.
+        # Suavização leve antes remove ruído de compressão JPEG sem borrar o texto.
+        suave = cv2.GaussianBlur(cinza, (3, 3), 0)
+        _, otsu = cv2.threshold(suave, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        # Estratégia 2 — Adaptativa Gaussiana: tolerante a sombras e iluminação irregular.
+        # Block size 31 cobre regiões maiores, adequado para fontes típicas de documentos.
+        adaptativa = cv2.adaptiveThreshold(
+            cinza, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 10
         )
 
-        # OCR com dados de confiança por palavra
-        dados = pytesseract.image_to_data(
-            binario,
-            lang="por",
-            output_type=pytesseract.Output.DICT,
-        )
+        # Estratégia 3 — CLAHE + Otsu: recupera documentos com baixo contraste global.
+        # CLAHE equaliza o histograma localmente sem superexpor regiões já claras.
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        equalizado = clahe.apply(cinza)
+        _, clahe_otsu = cv2.threshold(equalizado, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-        confs = [
-            int(c)
-            for c in dados["conf"]
-            if str(c).lstrip("-").isdigit() and int(c) >= 0
-        ]
-        palavras = [w for w in dados["text"] if w.strip()]
-        texto = " ".join(palavras)
-        confianca = sum(confs) / len(confs) if confs else 0.0
+        # OEM 1 = LSTM puro (mais preciso que o motor legado).
+        # PSM 6 = bloco de texto uniforme — evita falhas de segmentação em docs simples.
+        _CONFIG = "--oem 1 --psm 6"
 
-        return (texto.strip(), confianca)
+        melhor_texto = ""
+        melhor_conf = 0.0
+
+        for imagem_proc in (otsu, adaptativa, clahe_otsu):
+            dados = pytesseract.image_to_data(
+                imagem_proc,
+                lang="por",
+                config=_CONFIG,
+                output_type=pytesseract.Output.DICT,
+            )
+            confs = [
+                int(c)
+                for c in dados["conf"]
+                if str(c).lstrip("-").isdigit() and int(c) >= 0
+            ]
+            texto = " ".join(w for w in dados["text"] if w.strip()).strip()
+            confianca = sum(confs) / len(confs) if confs else 0.0
+
+            if confianca > melhor_conf:
+                melhor_conf = confianca
+                melhor_texto = texto
+
+        return (melhor_texto, melhor_conf)
     except Exception:
         return ("", 0.0)
 
