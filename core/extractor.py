@@ -10,7 +10,7 @@ import io
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import pdfplumber
 from pdf2image import convert_from_bytes
@@ -55,15 +55,8 @@ def extrair_conteudo_pdf(caminho: str | Path) -> ConteudoPDF:
             total_paginas=1,
         )
 
-    # PDF
+    # PDF — always convert pages to images for the image extraction pipeline
     total = _contar_paginas(caminho)
-    texto = _extrair_texto(caminho)
-    chars_por_pagina = len(texto) / max(total, 1)
-
-    if chars_por_pagina >= _LIMIAR_CHARS_POR_PAGINA:
-        return ConteudoPDF(texto=texto, imagens=[], total_paginas=total)
-
-    # PDF escaneado: converte para imagens
     imagens = _pdf_para_imagens(caminho)
     return ConteudoPDF(texto="", imagens=imagens, total_paginas=total)
 
