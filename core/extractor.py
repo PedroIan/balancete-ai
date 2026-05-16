@@ -19,6 +19,13 @@ from PIL import Image
 # Limiar mínimo de caracteres por página para considerar o PDF como "com texto"
 _LIMIAR_CHARS_POR_PAGINA = 50
 
+# DPI de conversão de PDFs escaneados. Aumente para 200 para melhor OCR (mais lento).
+DPI_PADRAO = 150
+
+# Thresholds do caminho rápido Tesseract → gemma4
+_TESSERACT_CONFIANCA_MIN = 60.0  # % de confiança mínima
+_TESSERACT_CHARS_MIN = 80        # caracteres mínimos de texto útil
+
 
 @dataclass
 class ConteudoPDF:
@@ -102,7 +109,7 @@ def _extrair_texto(caminho: Path) -> str:
     return "\n".join(partes)
 
 
-def _pdf_para_imagens(caminho: Path, dpi: int = 150) -> List[Tuple[int, bytes]]:
+def _pdf_para_imagens(caminho: Path, dpi: int = DPI_PADRAO) -> List[Tuple[int, bytes]]:
     """Converte cada página do PDF em PNG (página por página para evitar OOM)."""
     pdf_bytes = caminho.read_bytes()
     resultado: List[Tuple[int, bytes]] = []
@@ -127,3 +134,60 @@ def carregar_imagem_b64(caminho: str | Path) -> str:
 def bytes_para_b64(dados: bytes) -> str:
     """Converte bytes de PNG/imagem para string base64."""
     return base64.b64encode(dados).decode("utf-8")
+
+
+def ocr_com_tesseract(img_bytes: bytes) -> Tuple[str, float]:
+    """
+    Tenta OCR com Tesseract (idioma: por) após pré-processamento OpenCV.
+    Retorna (texto, confianca) com confianca em 0–100.
+    Retorna ("", 0.0) se Tesseract ou OpenCV não estiverem instalados — sem erros.
+    """
+    try:
+        import cv2
+        import numpy as np
+        import pytesseract
+    except ImportError:
+        return ("", 0.0)
+
+    try:
+        # Decodifica bytes → array OpenCV
+        arr = np.frombuffer(img_bytes, dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
+            return ("", 0.0)
+
+        # Pré-processamento: escala de cinza + binarização adaptativa
+        cinza = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        binario = cv2.adaptiveThreshold(
+            cinza, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
+        )
+
+        # OCR com dados de confiança por palavra
+        dados = pytesseract.image_to_data(
+            binario,
+            lang="por",
+            output_type=pytesseract.Output.DICT,
+        )
+
+        confs = [
+            int(c)
+            for c in dados["conf"]
+            if str(c).lstrip("-").isdigit() and int(c) >= 0
+        ]
+        palavras = [w for w in dados["text"] if w.strip()]
+        texto = " ".join(palavras)
+        confianca = sum(confs) / len(confs) if confs else 0.0
+
+        return (texto.strip(), confianca)
+    except Exception:
+        return ("", 0.0)
+
+
+def tesseract_disponivel() -> bool:
+    """Verifica se o Tesseract está instalado e acessível."""
+    try:
+        import pytesseract
+        pytesseract.get_tesseract_version()
+        return True
+    except Exception:
+        return False

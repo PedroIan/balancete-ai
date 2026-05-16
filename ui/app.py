@@ -20,7 +20,15 @@ import streamlit as st
 
 from core.classifier import extrair_de_imagem, extrair_de_texto
 from core.conciliacao import gerar_xlsx, preencher_template
-from core.extractor import ConteudoPDF, bytes_para_b64, carregar_imagem_b64, extrair_conteudo_pdf
+from core.extractor import (
+    ConteudoPDF,
+    _TESSERACT_CHARS_MIN,
+    _TESSERACT_CONFIANCA_MIN,
+    bytes_para_b64,
+    carregar_imagem_b64,
+    extrair_conteudo_pdf,
+    ocr_com_tesseract,
+)
 
 # Diretório de cache para imagens de PDFs escaneados
 _CACHE_DIR = Path.home() / ".balancete_cache" / "imagens"
@@ -257,14 +265,30 @@ def _processar_arquivo(arquivo, log_placeholder) -> None:
             st.session_state.dados_extraidos["extrato_movs"].extend(movs)
 
         elif conteudo.imagens:
-            log_placeholder.text(f"  → OCR via visão ({len(conteudo.imagens)} página(s))")
+            log_placeholder.text(f"  → {len(conteudo.imagens)} página(s) — tentando Tesseract...")
             caminhos = _salvar_imagens_em_disco(conteudo.imagens, arquivo.name)
             st.session_state.dados_extraidos["caminhos_imagens"].extend(caminhos)
 
             for num_pag, img_bytes in conteudo.imagens:
-                img_b64 = bytes_para_b64(img_bytes)
                 fonte = f"{arquivo.name} (pág. {num_pag})"
-                txs, movs = extrair_de_imagem(img_b64, fonte)
+                texto_ocr, confianca = ocr_com_tesseract(img_bytes)
+
+                if confianca >= _TESSERACT_CONFIANCA_MIN and len(texto_ocr) >= _TESSERACT_CHARS_MIN:
+                    log_placeholder.text(
+                        f"  → [tesseract({confianca:.0f}%)→gemma4] pág. {num_pag}"
+                    )
+                    txs, movs = extrair_de_texto(texto_ocr, fonte)
+                else:
+                    if texto_ocr:
+                        motivo = f"Confiança baixa ({confianca:.1f} < {_TESSERACT_CONFIANCA_MIN})"
+                    else:
+                        motivo = "Tesseract indisponível ou sem texto"
+                    log_placeholder.text(
+                        f"  → [qwen3-vl (ocr: {motivo})] pág. {num_pag}"
+                    )
+                    img_b64 = bytes_para_b64(img_bytes)
+                    txs, movs = extrair_de_imagem(img_b64, fonte)
+
                 st.session_state.dados_extraidos["transacoes"].extend(txs)
                 st.session_state.dados_extraidos["extrato_movs"].extend(movs)
         else:

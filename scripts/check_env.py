@@ -53,7 +53,19 @@ else:
     print(f"{ERR} Poppler não encontrado — veja SETUP.md")
     erros += 1
 
-# 5. Dependências Python
+# 5. Tesseract (opcional)
+if shutil.which("tesseract"):
+    result = subprocess.run(["tesseract", "--list-langs"], capture_output=True, text=True)
+    langs = result.stdout + result.stderr
+    if "por" in langs:
+        print(f"{OK} Tesseract disponível (idioma 'por' instalado) — caminho rápido ativo")
+    else:
+        print(f"{WARN} Tesseract encontrado mas sem idioma 'por' — OCR usará fallback qwen3-vl")
+        print(f"      Instale: baixe por.traineddata em github.com/tesseract-ocr/tessdata")
+else:
+    print(f"{WARN} Tesseract não encontrado (opcional) — OCR usará qwen3-vl para todas as imagens")
+
+# 6. Dependências Python obrigatórias
 deps = {
     "streamlit": "streamlit",
     "ollama": "ollama",
@@ -71,6 +83,17 @@ for nome_pip, nome_import in deps.items():
     else:
         print(f"{ERR} {nome_pip} não instalado — pip install -r requirements.txt")
         erros += 1
+
+# 7. Dependências Python opcionais (Tesseract)
+deps_opcionais = {
+    "pytesseract": "pytesseract",
+    "opencv-python": "cv2",
+}
+for nome_pip, nome_import in deps_opcionais.items():
+    if importlib.util.find_spec(nome_import):
+        print(f"{OK} {nome_pip} (opcional)")
+    else:
+        print(f"{WARN} {nome_pip} não instalado (opcional) — pip install {nome_pip}")
 
 print()
 if erros == 0:
