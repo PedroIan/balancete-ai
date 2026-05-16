@@ -19,8 +19,10 @@ from PIL import Image
 # Limiar mínimo de caracteres por página para considerar o PDF como "com texto"
 _LIMIAR_CHARS_POR_PAGINA = 50
 
-# DPI de conversão de PDFs escaneados. Aumente para 200 para melhor OCR (mais lento).
-DPI_PADRAO = 150
+# DPI de conversão de PDFs escaneados.
+# 300 DPI é o mínimo recomendado pelo Tesseract para PDFs com texto vetorial.
+# Quando o Tesseract falha e a imagem vai para o qwen3-vl, ela é reduzida antes do envio.
+DPI_PADRAO = 300
 
 # Thresholds do caminho rápido Tesseract → gemma4
 _TESSERACT_CONFIANCA_MIN = 60.0  # % de confiança mínima
@@ -216,6 +218,32 @@ def ocr_com_tesseract(img_bytes: bytes) -> Tuple[str, float]:
         return (melhor_texto, melhor_conf)
     except Exception:
         return ("", 0.0)
+
+
+def redimensionar_imagem(img_bytes: bytes, fator: float) -> bytes:
+    """
+    Redimensiona a imagem pelo fator dado e retorna os bytes PNG resultantes.
+    Usa INTER_AREA para downscaling (melhor qualidade que INTER_LINEAR na redução).
+    Retorna os bytes originais se OpenCV não estiver disponível ou ocorrer erro.
+    """
+    try:
+        import cv2
+        import numpy as np
+
+        arr = np.frombuffer(img_bytes, dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
+            return img_bytes
+        h, w = img.shape[:2]
+        reduzida = cv2.resize(
+            img,
+            (max(1, int(w * fator)), max(1, int(h * fator))),
+            interpolation=cv2.INTER_AREA,
+        )
+        _, buf = cv2.imencode(".png", reduzida)
+        return buf.tobytes()
+    except Exception:
+        return img_bytes
 
 
 def tesseract_disponivel() -> bool:

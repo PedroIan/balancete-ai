@@ -28,6 +28,7 @@ from core.extractor import (
     carregar_imagem_b64,
     extrair_conteudo_pdf,
     ocr_com_tesseract,
+    redimensionar_imagem,
 )
 
 # Diretório de cache para imagens de PDFs escaneados
@@ -316,10 +317,14 @@ def _processar_arquivo(arquivo, status) -> None:
                         if texto_ocr
                         else "Tesseract indisponível"
                     )
+                    # Reduz de 300 DPI para 150 DPI antes de enviar ao qwen3-vl:
+                    # o modelo de visão não precisa de alta resolução e imagens menores
+                    # reduzem memória e latência na chamada ao Ollama.
                     status.write(
-                        f"  🔄 {motivo} → 🤖 qwen3-vl:8b... aguarde"
+                        f"  🔄 {motivo} → reduzindo para 150 DPI → 🤖 qwen3-vl:8b... aguarde"
                     )
-                    img_b64 = bytes_para_b64(img_bytes)
+                    img_reduzida = redimensionar_imagem(img_bytes, fator=0.5)
+                    img_b64 = bytes_para_b64(img_reduzida)
                     txs, movs = extrair_de_imagem(img_b64, fonte)
                     status.write(
                         f"  ✅ Pág. {num_pag}: {len(txs)} transação(ões) · {len(movs)} mov."
