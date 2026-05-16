@@ -185,7 +185,8 @@ def _tela_revisao() -> None:
                 df_tx["⚠️"] = df_tx["suspeito"].apply(lambda s: "⚠️" if s else "")
             colunas_editor = [
                 "⚠️", "data", "tipo", "valor", "categoria",
-                "fornecedor", "cnpj", "descricao", "fonte",
+                "fonte_pagadora", "prestador_destino", "cnpj",
+                "numero_documento", "descricao", "fonte",
             ]
             colunas_editor = [c for c in colunas_editor if c in df_tx.columns]
 
@@ -197,6 +198,9 @@ def _tela_revisao() -> None:
                     "valor": st.column_config.NumberColumn("Valor (R$)", format="%.2f"),
                     "data": st.column_config.TextColumn("Data (AAAA-MM-DD)"),
                     "tipo": st.column_config.SelectboxColumn("Tipo", options=["receita", "despesa"]),
+                    "fonte_pagadora": st.column_config.TextColumn("Fonte Pagadora"),
+                    "prestador_destino": st.column_config.TextColumn("Prestador/Destino"),
+                    "numero_documento": st.column_config.TextColumn("Nº Doc."),
                     "⚠️": st.column_config.TextColumn("⚠️", disabled=True, width="small"),
                 },
                 key="editor_transacoes",
@@ -361,13 +365,22 @@ def _gerar_resultado() -> None:
 
 def _reconstruir_transacoes(txs_editadas: List[Dict]) -> List[Dict]:
     """Reconstrói transações a partir dos dados do data_editor, recalculando suspeito."""
+    import math
     from core.classifier import _validar_cnpj
 
     resultado = []
     for t in txs_editadas:
         valor = abs(float(t.get("valor") or 0))
         descricao = str(t.get("descricao") or "").strip()
-        data_str = str(t.get("data") or "").strip()
+
+        # pandas representa células vazias como NaN (float); tratar como vazio
+        data_raw = t.get("data")
+        data_str = (
+            ""
+            if data_raw is None or (isinstance(data_raw, float) and math.isnan(data_raw))
+            else str(data_raw).strip()
+        )
+
         cnpj_raw = str(t.get("cnpj") or "").strip()
 
         if cnpj_raw:
@@ -384,9 +397,11 @@ def _reconstruir_transacoes(txs_editadas: List[Dict]) -> List[Dict]:
 
         resultado.append({
             "data": data_str or date.today().isoformat(),
-            "fornecedor": str(t.get("fornecedor") or "").strip(),
+            "fonte_pagadora": str(t.get("fonte_pagadora") or "").strip(),
+            "prestador_destino": str(t.get("prestador_destino") or "").strip(),
             "cnpj": cnpj_limpo,
             "descricao": descricao,
+            "numero_documento": str(t.get("numero_documento") or "").strip(),
             "valor": valor,
             "tipo": t.get("tipo", "despesa"),
             "categoria": str(t.get("categoria") or "Outras Despesas").strip(),
@@ -410,16 +425,25 @@ def _salvar_imagens_em_disco(
 
 
 def _deduplicar_transacoes(transacoes: List[Dict]) -> List[Dict]:
-    """Remove duplicatas por (data, valor arredondado, fornecedor em maiúsculas, tipo)."""
+    """
+    Remove duplicatas usando número de documento quando disponível;
+    caso contrário, usa (data, valor, prestador, tipo).
+    Isso evita falsos positivos: dois pagamentos à mesma empresa no mesmo
+    dia são legítimos se possuírem números de documento distintos.
+    """
     vistas: set = set()
     unicas: List[Dict] = []
     for t in transacoes:
-        chave = (
-            t.get("data", ""),
-            round(float(t.get("valor") or 0), 2),
-            str(t.get("fornecedor") or "").upper(),
-            t.get("tipo", ""),
-        )
+        num_doc = str(t.get("numero_documento") or "").strip()
+        if num_doc:
+            chave = ("doc", num_doc, t.get("tipo", ""))
+        else:
+            chave = (
+                t.get("data") or "",
+                round(float(t.get("valor") or 0), 2),
+                str(t.get("prestador_destino") or "").upper(),
+                t.get("tipo", ""),
+            )
         if chave not in vistas:
             vistas.add(chave)
             unicas.append(t)
