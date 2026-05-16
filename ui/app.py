@@ -20,7 +20,16 @@ import streamlit as st
 
 from core.classifier import extrair_de_imagem, extrair_de_texto
 from core.conciliacao import gerar_xlsx, preencher_template
-from core.extractor import ConteudoPDF, bytes_para_b64, carregar_imagem_b64, extrair_conteudo_pdf
+from core.extractor import (
+    ConteudoPDF,
+    _TESSERACT_CHARS_MIN,
+    _TESSERACT_CONFIANCA_MIN,
+    bytes_para_b64,
+    carregar_imagem_b64,
+    extrair_conteudo_pdf,
+    ocr_com_tesseract,
+    redimensionar_imagem,
+)
 
 # Diretório de cache para imagens de PDFs escaneados
 _CACHE_DIR = Path.home() / ".balancete_cache" / "imagens"
@@ -103,25 +112,46 @@ def _tela_configuracao() -> None:
         st.session_state.saldo_inicial = saldo_inicial
         st.session_state.template_bytes = template.read() if template else None
 
-        progresso = st.progress(0, text="Iniciando processamento...")
-        log = st.empty()
         total = len(arquivos)
+        progresso = st.progress(0.0, text=f"0 de {total} arquivo(s) processado(s)")
 
         for idx, arquivo in enumerate(arquivos):
-            log.text(f"[{idx+1}/{total}] Processando: {arquivo.name}")
-            try:
-                _processar_arquivo(arquivo, log)
-            except Exception as e:
-                st.warning(f"Erro ao processar {arquivo.name}: {e}")
-            progresso.progress((idx + 1) / total, text=f"[{idx+1}/{total}] {arquivo.name}")
+            with st.status(
+                f"📄 [{idx + 1}/{total}] {arquivo.name}", expanded=True
+            ) as status:
+                try:
+                    _processar_arquivo(arquivo, status)
+                    status.update(
+                        label=f"✅ [{idx + 1}/{total}] {arquivo.name}",
+                        state="complete",
+                        expanded=False,
+                    )
+                except Exception as e:
+                    status.update(
+                        label=f"❌ [{idx + 1}/{total}] {arquivo.name} — erro",
+                        state="error",
+                        expanded=True,
+                    )
+                    status.write(f"Detalhe: {e}")
+
+            progresso.progress(
+                (idx + 1) / total,
+                text=f"{idx + 1} de {total} arquivo(s) processado(s)",
+            )
 
         # Deduplicação
-        txs = st.session_state.dados_extraidos["transacoes"]
-        txs = _deduplicar_transacoes(txs)
-        st.session_state.dados_extraidos["transacoes"] = txs
+        with st.status("🔄 Deduplicando transações...", expanded=False) as s_dedup:
+            txs = st.session_state.dados_extraidos["transacoes"]
+            antes = len(txs)
+            txs = _deduplicar_transacoes(txs)
+            st.session_state.dados_extraidos["transacoes"] = txs
+            removidas = antes - len(txs)
+            label_dedup = f"✅ {len(txs)} transação(ões) únicas"
+            if removidas:
+                label_dedup += f" — {removidas} duplicata(s) removida(s)"
+            s_dedup.update(label=label_dedup, state="complete")
 
-        log.text("Processamento concluído.")
-        progresso.progress(1.0, text="Processamento concluído!")
+        progresso.progress(1.0, text=f"✅ {total} arquivo(s) processado(s)")
         st.session_state.tela = "revisao"
         st.rerun()
 
@@ -241,8 +271,10 @@ def _tela_download() -> None:
 
 # ── Funções auxiliares ───────────────────────────────────────────────────────
 
-def _processar_arquivo(arquivo, log_placeholder) -> None:
-    """Extrai conteúdo e classifica um único arquivo enviado pelo usuário."""
+def _processar_arquivo(arquivo, status) -> None:
+    """Extrai conteúdo e classifica um único arquivo. `status` é o st.status() ativo."""
+    status.write("🔍 Etapa 1/3 — Detectando tipo de documento...")
+
     with tempfile.NamedTemporaryFile(suffix=Path(arquivo.name).suffix, delete=False) as tmp:
         tmp.write(arquivo.read())
         tmp_path = Path(tmp.name)
@@ -251,24 +283,58 @@ def _processar_arquivo(arquivo, log_placeholder) -> None:
         conteudo: ConteudoPDF = extrair_conteudo_pdf(tmp_path)
 
         if conteudo.tem_texto:
-            log_placeholder.text(f"  → Extração de texto (PDF digital)")
+            status.write(f"📄 Etapa 2/3 — PDF digital: {len(conteudo.texto):,} caracteres extraídos")
+            status.write("🤖 Etapa 3/3 — Classificando via LLM (gemma4:e4b)... aguarde")
             txs, movs = extrair_de_texto(conteudo.texto, arquivo.name)
+            status.write(
+                f"✅ {len(txs)} transação(ões) · {len(movs)} movimentação(ões) de extrato"
+            )
             st.session_state.dados_extraidos["transacoes"].extend(txs)
             st.session_state.dados_extraidos["extrato_movs"].extend(movs)
 
         elif conteudo.imagens:
-            log_placeholder.text(f"  → OCR via visão ({len(conteudo.imagens)} página(s))")
+            n_pags = len(conteudo.imagens)
+            status.write(f"🖼️ Etapa 2/3 — PDF escaneado: {n_pags} página(s) detectada(s)")
             caminhos = _salvar_imagens_em_disco(conteudo.imagens, arquivo.name)
             st.session_state.dados_extraidos["caminhos_imagens"].extend(caminhos)
 
             for num_pag, img_bytes in conteudo.imagens:
-                img_b64 = bytes_para_b64(img_bytes)
                 fonte = f"{arquivo.name} (pág. {num_pag})"
-                txs, movs = extrair_de_imagem(img_b64, fonte)
+                status.write(f"  📷 Pág. {num_pag}/{n_pags} — OCR Tesseract...")
+                texto_ocr, confianca = ocr_com_tesseract(img_bytes)
+
+                if confianca >= _TESSERACT_CONFIANCA_MIN and len(texto_ocr) >= _TESSERACT_CHARS_MIN:
+                    status.write(
+                        f"  ✅ Tesseract ({confianca:.0f}%) → 🤖 gemma4:e4b... aguarde"
+                    )
+                    txs, movs = extrair_de_texto(texto_ocr, fonte)
+                    status.write(
+                        f"  ✅ Pág. {num_pag}: {len(txs)} transação(ões) · {len(movs)} mov."
+                    )
+                else:
+                    motivo = (
+                        f"confiança {confianca:.0f}% < {_TESSERACT_CONFIANCA_MIN:.0f}%"
+                        if texto_ocr
+                        else "Tesseract indisponível"
+                    )
+                    # Reduz de 300 DPI para 150 DPI antes de enviar ao qwen3-vl:
+                    # o modelo de visão não precisa de alta resolução e imagens menores
+                    # reduzem memória e latência na chamada ao Ollama.
+                    status.write(
+                        f"  🔄 {motivo} → reduzindo para 150 DPI → 🤖 qwen3-vl:8b... aguarde"
+                    )
+                    img_reduzida = redimensionar_imagem(img_bytes, fator=0.5)
+                    img_b64 = bytes_para_b64(img_reduzida)
+                    txs, movs = extrair_de_imagem(img_b64, fonte)
+                    status.write(
+                        f"  ✅ Pág. {num_pag}: {len(txs)} transação(ões) · {len(movs)} mov."
+                    )
+
                 st.session_state.dados_extraidos["transacoes"].extend(txs)
                 st.session_state.dados_extraidos["extrato_movs"].extend(movs)
+
         else:
-            log_placeholder.text(f"  → Nenhum conteúdo extraível")
+            status.write("⚠️ Nenhum conteúdo extraível neste documento")
     finally:
         tmp_path.unlink(missing_ok=True)
 

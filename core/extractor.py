@@ -19,6 +19,15 @@ from PIL import Image
 # Limiar mínimo de caracteres por página para considerar o PDF como "com texto"
 _LIMIAR_CHARS_POR_PAGINA = 50
 
+# DPI de conversão de PDFs escaneados.
+# 300 DPI é o mínimo recomendado pelo Tesseract para PDFs com texto vetorial.
+# Quando o Tesseract falha e a imagem vai para o qwen3-vl, ela é reduzida antes do envio.
+DPI_PADRAO = 300
+
+# Thresholds do caminho rápido Tesseract → gemma4
+_TESSERACT_CONFIANCA_MIN = 60.0  # % de confiança mínima
+_TESSERACT_CHARS_MIN = 80        # caracteres mínimos de texto útil
+
 
 @dataclass
 class ConteudoPDF:
@@ -102,7 +111,7 @@ def _extrair_texto(caminho: Path) -> str:
     return "\n".join(partes)
 
 
-def _pdf_para_imagens(caminho: Path, dpi: int = 150) -> List[Tuple[int, bytes]]:
+def _pdf_para_imagens(caminho: Path, dpi: int = DPI_PADRAO) -> List[Tuple[int, bytes]]:
     """Converte cada página do PDF em PNG (página por página para evitar OOM)."""
     pdf_bytes = caminho.read_bytes()
     resultado: List[Tuple[int, bytes]] = []
@@ -127,3 +136,121 @@ def carregar_imagem_b64(caminho: str | Path) -> str:
 def bytes_para_b64(dados: bytes) -> str:
     """Converte bytes de PNG/imagem para string base64."""
     return base64.b64encode(dados).decode("utf-8")
+
+
+def ocr_com_tesseract(img_bytes: bytes) -> Tuple[str, float]:
+    """
+    Tenta OCR com Tesseract usando múltiplas estratégias de pré-processamento.
+    Retorna (texto, confiança) da estratégia com maior confiança — confiança em 0–100.
+    Retorna ("", 0.0) se Tesseract ou OpenCV não estiverem instalados.
+
+    Pipeline:
+    1. Upscala para mínimo de 2000px no lado maior (Tesseract precisa de ~300 DPI)
+    2. Testa 3 binarizações: Otsu, Adaptativa Gaussiana, CLAHE+Otsu
+    3. Retorna o resultado com maior confiança média por palavra
+    """
+    try:
+        import cv2
+        import numpy as np
+        import pytesseract
+    except ImportError:
+        return ("", 0.0)
+
+    try:
+        arr = np.frombuffer(img_bytes, dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
+            return ("", 0.0)
+
+        cinza = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        # Upscaling: Tesseract funciona melhor com imagens equivalentes a ≥ 300 DPI.
+        # Páginas A4 a 150 DPI têm ~1240px no lado menor — abaixo do ideal.
+        h, w = cinza.shape
+        lado_maior = max(h, w)
+        if lado_maior < 2000:
+            fator = max(2, int(2000 / lado_maior) + 1)
+            cinza = cv2.resize(cinza, (w * fator, h * fator), interpolation=cv2.INTER_CUBIC)
+
+        # Estratégia 1 — Otsu: bom para documentos de alto contraste e iluminação uniforme.
+        # Suavização leve antes remove ruído de compressão JPEG sem borrar o texto.
+        suave = cv2.GaussianBlur(cinza, (3, 3), 0)
+        _, otsu = cv2.threshold(suave, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        # Estratégia 2 — Adaptativa Gaussiana: tolerante a sombras e iluminação irregular.
+        # Block size 31 cobre regiões maiores, adequado para fontes típicas de documentos.
+        adaptativa = cv2.adaptiveThreshold(
+            cinza, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 10
+        )
+
+        # Estratégia 3 — CLAHE + Otsu: recupera documentos com baixo contraste global.
+        # CLAHE equaliza o histograma localmente sem superexpor regiões já claras.
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        equalizado = clahe.apply(cinza)
+        _, clahe_otsu = cv2.threshold(equalizado, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        # OEM 1 = LSTM puro (mais preciso que o motor legado).
+        # PSM 6 = bloco de texto uniforme — evita falhas de segmentação em docs simples.
+        _CONFIG = "--oem 1 --psm 6"
+
+        melhor_texto = ""
+        melhor_conf = 0.0
+
+        for imagem_proc in (otsu, adaptativa, clahe_otsu):
+            dados = pytesseract.image_to_data(
+                imagem_proc,
+                lang="por",
+                config=_CONFIG,
+                output_type=pytesseract.Output.DICT,
+            )
+            confs = [
+                int(c)
+                for c in dados["conf"]
+                if str(c).lstrip("-").isdigit() and int(c) >= 0
+            ]
+            texto = " ".join(w for w in dados["text"] if w.strip()).strip()
+            confianca = sum(confs) / len(confs) if confs else 0.0
+
+            if confianca > melhor_conf:
+                melhor_conf = confianca
+                melhor_texto = texto
+
+        return (melhor_texto, melhor_conf)
+    except Exception:
+        return ("", 0.0)
+
+
+def redimensionar_imagem(img_bytes: bytes, fator: float) -> bytes:
+    """
+    Redimensiona a imagem pelo fator dado e retorna os bytes PNG resultantes.
+    Usa INTER_AREA para downscaling (melhor qualidade que INTER_LINEAR na redução).
+    Retorna os bytes originais se OpenCV não estiver disponível ou ocorrer erro.
+    """
+    try:
+        import cv2
+        import numpy as np
+
+        arr = np.frombuffer(img_bytes, dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
+            return img_bytes
+        h, w = img.shape[:2]
+        reduzida = cv2.resize(
+            img,
+            (max(1, int(w * fator)), max(1, int(h * fator))),
+            interpolation=cv2.INTER_AREA,
+        )
+        _, buf = cv2.imencode(".png", reduzida)
+        return buf.tobytes()
+    except Exception:
+        return img_bytes
+
+
+def tesseract_disponivel() -> bool:
+    """Verifica se o Tesseract está instalado e acessível."""
+    try:
+        import pytesseract
+        pytesseract.get_tesseract_version()
+        return True
+    except Exception:
+        return False
