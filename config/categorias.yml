@@ -1,0 +1,74 @@
+# Regras deterministicas de categorizacao — avaliadas em ordem, a primeira que bater ganha.
+# padrao: regex case-insensitive aplicado sobre "fornecedor + descricao" concatenados
+# Regras mais específicas devem vir antes das genéricas.
+
+regras:
+  # ── Energia Elétrica ─────────────────────────────────────────────────────────
+  - padrao: "CEMIG|CPFL|ENEL|ENERGISA|COELBA|COELCE|CELESC|COSERN|CELPA|CEMAR|CEAL|CERON|ELETROACRE|ELETROBRAS|COPEL|SAELPA|COMGAS|\\bCEG\\b"
+    categoria: "Energia Elétrica"
+    tipo: despesa
+
+  # ── Água e Esgoto ─────────────────────────────────────────────────────────────
+  - padrao: "COPASA|SABESP|SANEAGO|CAESB|CAGECE|CASAN|CEDAE|CORSAN|CAEMA|CAERD|AGESPISA|SANEPAR|EMBASA|CASAL|DESO|AGERON|COSAMA"
+    categoria: "Água e Esgoto"
+    tipo: despesa
+
+  # ── Pessoal e Encargos ────────────────────────────────────────────────────────
+  - padrao: "FOLHA DE PAGAMENTO|\\bFGTS\\b|\\bINSS\\b|\\bGPS\\b|\\bDARF\\b|RESCISAO|RESCISÃO|FERIAS|FÉRIAS|13.*SALARIO|13.*SALÁRIO|VALE.TRANSPORTE|VALE.ALIMENTACAO|VALE.ALIMENTAÇÃO|\\bSALARIO\\b|\\bSALÁRIO\\b|PRO.LABORE|PRÓ.LABORE"
+    categoria: "Pessoal e Encargos"
+    tipo: despesa
+
+  # ── Taxa de Mudança (receita) — padrão específico antes de "MUDANÇA" genérico ─
+  - padrao: "TAXA DE MUDAN[CÇ]A"
+    categoria: "Taxa de Mudança"
+    tipo: receita
+
+  # ── Multas e Juros (receita) — padrão específico para condomínio ─────────────
+  - padrao: "MULTA CONDOMINIAL|JUROS DE MORA|JUROS MORA|MORA CONDOMINIAL|MULTA.*CONDOMIN"
+    categoria: "Multas e Juros"
+    tipo: receita
+
+  # ── Fundo de Reserva ─────────────────────────────────────────────────────────
+  - padrao: "FUNDO DE RESERVA|\\bFDR\\b"
+    categoria: "Fundo de Reserva"
+    tipo: receita
+
+  # ── Cota Extra ────────────────────────────────────────────────────────────────
+  - padrao: "COTA EXTRA|RATEIO EXTRA|RATEIO.*OBRA|RATEIO.*REFORMA"
+    categoria: "Cota Extra"
+    tipo: receita
+
+  # ── Administração ─────────────────────────────────────────────────────────────
+  - padrao: "HONORARIO|HONORÁRIO|ADMINISTRADORA|TAXA DE ADM|CONTABILIDADE|ASSESSORIA JURIDICA|ASSESSORIA JURÍDICA"
+    categoria: "Administração"
+    tipo: despesa
+
+  # ── Seguro ────────────────────────────────────────────────────────────────────
+  - padrao: "SEGURO PREDIAL|SEGURO INCENDIO|SEGURO INCÊNDIO|SEGURO.*CONDOMIN|SEGURO.*ELEVADOR|APOLICE|APÓLICE"
+    categoria: "Seguro"
+    tipo: despesa
+
+  # ── Tributos ──────────────────────────────────────────────────────────────────
+  - padrao: "\\bIPTU\\b|\\bISS\\b|\\bISSQN\\b|TAXA DE BOMBEIRO|TAXA.*INCENDIO|TAXA.*INCÊNDIO"
+    categoria: "Tributos"
+    tipo: despesa
+
+  # ── Serviços Contratados ─────────────────────────────────────────────────────
+  - padrao: "\\bPORTARIA\\b|VIGILANCIA|VIGILÂNCIA|MONITORAMENTO|\\bCFTV\\b|INTERFONE|CONTROLE.*ACESSO|ACESSO.*CONTROLE"
+    categoria: "Serviços Contratados"
+    tipo: despesa
+
+  # ── Limpeza ──────────────────────────────────────────────────────────────────
+  - padrao: "DEDETIZA|DESINSETIZA|DESCUPINIZA|DESINFEC|\\bFAXINA\\b|ZELADORIA|LIMPEZA"
+    categoria: "Limpeza"
+    tipo: despesa
+
+  # ── Manutenção ───────────────────────────────────────────────────────────────
+  - padrao: "MANUT[EÊ]N|ELEVADOR|\\bBOMBA\\b|PINTURA|REFORMA|INSTALAC|INSTALAÇÃO|CONSERTO|REPARO|HIDRA[UÚ]LICA|ELETRICA|ELÉTRICA"
+    categoria: "Manutenção"
+    tipo: despesa
+
+  # ── Material de Consumo ──────────────────────────────────────────────────────
+  - padrao: "MATERIAL DE LIMPEZA|MATERIAL DE CONSUMO|PAPELARIA|SUPRIMENTO|EPI\\b"
+    categoria: "Material de Consumo"
+    tipo: despesa
