@@ -19,54 +19,36 @@ import yaml
 TEXTO_MODEL = "gemma4:e4b"
 VISAO_MODEL = "qwen3-vl:8b"
 
-_PROMPT_UNIFICADO = """Você é um extrator de dados financeiros para balancetes de condomínio.
-Analise o documento e retorne APENAS um JSON válido, sem texto adicional.
+# Detecta presença de conteúdo financeiro no texto para decidir se vale retry
+_RE_FINANCEIRO = re.compile(
+    r"R\$|\bvalor\b|\bpagamento\b|\bfatura\b|\bnota fiscal\b|\brecibo\b"
+    r"|\bdébito\b|\bcrédito\b|\bvencimento\b|\bextrato\b|\bsaldo\b",
+    re.IGNORECASE,
+)
 
-Regras:
-- tipo_documento: "extrato_bancario" | "comprovante" | "recibo" | "nota_fiscal" | "outro"
-- Para extrato_bancario: retorne lista de movimentações em "movimentacoes"
-- Para outros tipos: retorne lista de transações em "transacoes"
-- Valores sempre positivos (float). Use ponto decimal.
-- Datas no formato AAAA-MM-DD.
-- tipo de transação: "receita" ou "despesa"
+# Prompt minimalista usado apenas no retry — sem exemplos, para modelos que
+# travam com JSON complexo na primeira tentativa.
+_PROMPT_FALLBACK = """Extraia os dados financeiros do documento abaixo.
+Retorne APENAS um JSON válido, sem texto adicional.
 
-Formato para extrato_bancario:
-{
-  "tipo_documento": "extrato_bancario",
-  "movimentacoes": [
-    {
-      "data": "AAAA-MM-DD",
-      "descricao": "texto",
-      "valor": 0.00,
-      "tipo": "credito" ou "debito",
-      "saldo": 0.00 ou null
-    }
-  ]
-}
-
-Formato para comprovante/recibo/nota_fiscal:
 {
   "tipo_documento": "comprovante",
   "transacoes": [
     {
-      "data": "AAAA-MM-DD",
-      "fornecedor": "nome",
-      "cnpj": "somente digitos ou vazio",
-      "descricao": "texto",
+      "data": null,
+      "fonte_pagadora": "quem pagou",
+      "prestador_destino": "quem recebeu",
+      "cnpj": "",
+      "descricao": "descrição do serviço",
+      "numero_documento": "",
       "valor": 0.00,
-      "tipo": "despesa" ou "receita",
-      "categoria_sugerida": "categoria"
+      "tipo": "despesa",
+      "categoria": "Outras Despesas"
     }
   ]
 }
 
-Formato para documento sem dados:
-{
-  "tipo_documento": "outro",
-  "transacoes": []
-}
-
-Documento a analisar:
+Documento:
 """
 
 
@@ -79,14 +61,87 @@ def _carregar_regras() -> List[Dict]:
     return dados.get("regras", [])
 
 
+@lru_cache(maxsize=1)
+def _categorias_validas() -> Tuple[str, ...]:
+    """Retorna tupla ordenada de categorias únicas do categorias.yml (cache-friendly)."""
+    return tuple(dict.fromkeys(r["categoria"] for r in _carregar_regras()))
+
+
+@lru_cache(maxsize=1)
+def _prompt_principal() -> str:
+    """
+    Prompt completo com:
+    - Lista de categorias válidas embutida
+    - Campos explícitos para fonte_pagadora e prestador_destino
+    - Campo numero_documento
+    - data como null quando ausente (sem fallback silencioso)
+    """
+    cats = ", ".join(_categorias_validas())
+    return f"""Você é um extrator de dados financeiros para balancetes de condomínio.
+Analise o documento e retorne APENAS um JSON válido, sem texto adicional.
+
+Categorias válidas (use EXATAMENTE uma): {cats}, Outras Despesas, Outras Receitas.
+
+Campos para comprovante/recibo/nota_fiscal:
+- fonte_pagadora: nome de quem pagou (condomínio, empresa ou pessoa física)
+- prestador_destino: nome de quem recebeu (empresa, prestador, fornecedor)
+- cnpj: CNPJ do recebedor somente com dígitos, ou string vazia se ausente
+- numero_documento: número da NF, recibo ou protocolo, ou string vazia se ausente
+- data: data em AAAA-MM-DD, ou null se não encontrar no documento
+- valor: float positivo com ponto decimal
+- tipo: "receita" ou "despesa"
+- categoria: exatamente uma das categorias válidas acima
+
+Formato para extrato_bancario:
+{{
+  "tipo_documento": "extrato_bancario",
+  "movimentacoes": [
+    {{
+      "data": "AAAA-MM-DD",
+      "descricao": "texto",
+      "valor": 0.00,
+      "tipo": "credito" ou "debito",
+      "saldo": 0.00 ou null
+    }}
+  ]
+}}
+
+Formato para comprovante/recibo/nota_fiscal:
+{{
+  "tipo_documento": "comprovante",
+  "transacoes": [
+    {{
+      "data": "AAAA-MM-DD ou null",
+      "fonte_pagadora": "nome do pagador",
+      "prestador_destino": "nome do recebedor",
+      "cnpj": "somente digitos ou vazio",
+      "descricao": "serviço ou produto",
+      "numero_documento": "número ou vazio",
+      "valor": 0.00,
+      "tipo": "despesa" ou "receita",
+      "categoria": "categoria exata da lista"
+    }}
+  ]
+}}
+
+Formato para documento sem dados financeiros:
+{{
+  "tipo_documento": "outro",
+  "transacoes": []
+}}
+
+Documento a analisar:
+"""
+
+
 def aplicar_regras_deterministicas(
-    fornecedor: Optional[str], descricao: Optional[str]
+    prestador: Optional[str], descricao: Optional[str]
 ) -> Tuple[Optional[str], Optional[str]]:
     """
     Tenta categorizar via regras do categorias.yml.
     Retorna (categoria, tipo) ou (None, None) se nenhuma regra bater.
     """
-    texto = " ".join(filter(None, [fornecedor, descricao])).upper()
+    texto = " ".join(filter(None, [prestador, descricao])).upper()
     if not texto.strip():
         return (None, None)
 
@@ -102,26 +157,59 @@ def aplicar_regras_deterministicas(
 
 
 def extrair_de_texto(texto: str, fonte: str) -> Tuple[List[Dict], List[Dict]]:
-    """
-    Entry point para PDFs com texto extraível.
-    Retorna (transacoes, extrato_movs).
-    """
-    resposta = _llm_texto(texto)
-    return _processar_resposta(resposta, fonte)
+    """Entry point para PDFs com texto extraível. Retorna (transacoes, extrato_movs)."""
+    dados = _chamar_llm_texto_com_retry(texto)
+    return _processar_dados(dados, fonte)
 
 
 def extrair_de_imagem(img_b64: str, fonte: str) -> Tuple[List[Dict], List[Dict]]:
-    """
-    Entry point para PDFs escaneados e imagens diretas.
-    Retorna (transacoes, extrato_movs).
-    """
-    resposta = _llm_visao(img_b64)
-    return _processar_resposta(resposta, fonte)
+    """Entry point para PDFs escaneados e imagens diretas. Retorna (transacoes, extrato_movs)."""
+    dados = _chamar_llm_visao_com_retry(img_b64)
+    return _processar_dados(dados, fonte)
 
 
-def _llm_texto(texto: str) -> str:
-    """Chama o modelo de texto via Ollama."""
-    prompt = _PROMPT_UNIFICADO + texto
+# ── Camada de retry ──────────────────────────────────────────────────────────
+
+def _chamar_llm_texto_com_retry(texto: str) -> Dict:
+    """
+    Primeira tentativa com o prompt completo (categorias + campos detalhados).
+    Se retornar "outro" E o texto tiver palavras financeiras, tenta uma vez
+    com o prompt de fallback minimalista.
+    """
+    resposta = _llm_texto(_prompt_principal() + texto)
+    dados = _parse_json_llm(resposta)
+
+    if dados.get("tipo_documento") == "outro" and _RE_FINANCEIRO.search(texto):
+        resposta2 = _llm_texto(_PROMPT_FALLBACK + texto)
+        dados2 = _parse_json_llm(resposta2)
+        if dados2.get("tipo_documento") != "outro":
+            return dados2
+
+    return dados
+
+
+def _chamar_llm_visao_com_retry(img_b64: str) -> Dict:
+    """
+    Primeira tentativa com o prompt completo.
+    Se retornar "outro", tenta uma vez com o prompt de fallback
+    (não há como checar palavras financeiras em base64).
+    """
+    resposta = _llm_visao(img_b64, _prompt_principal())
+    dados = _parse_json_llm(resposta)
+
+    if dados.get("tipo_documento") == "outro":
+        resposta2 = _llm_visao(img_b64, _PROMPT_FALLBACK)
+        dados2 = _parse_json_llm(resposta2)
+        if dados2.get("tipo_documento") != "outro":
+            return dados2
+
+    return dados
+
+
+# ── Chamadas ao Ollama ───────────────────────────────────────────────────────
+
+def _llm_texto(prompt: str) -> str:
+    """Chama o modelo de texto via Ollama. O prompt já inclui o conteúdo."""
     resposta = ollama.chat(
         model=TEXTO_MODEL,
         messages=[{"role": "user", "content": prompt}],
@@ -130,14 +218,14 @@ def _llm_texto(texto: str) -> str:
     return resposta["message"]["content"]
 
 
-def _llm_visao(img_b64: str) -> str:
+def _llm_visao(img_b64: str, prompt_base: str) -> str:
     """Chama o modelo de visão via Ollama com imagem em base64."""
     resposta = ollama.chat(
         model=VISAO_MODEL,
         messages=[
             {
                 "role": "user",
-                "content": _PROMPT_UNIFICADO + "Analise a imagem do documento.",
+                "content": prompt_base + "Analise a imagem do documento.",
                 "images": [img_b64],
             }
         ],
@@ -146,11 +234,10 @@ def _llm_visao(img_b64: str) -> str:
     return resposta["message"]["content"]
 
 
-def _processar_resposta(
-    resposta_bruta: str, fonte: str
-) -> Tuple[List[Dict], List[Dict]]:
-    """Parseia o JSON do LLM e normaliza para as estruturas internas."""
-    dados = _parse_json_llm(resposta_bruta)
+# ── Processamento da resposta ────────────────────────────────────────────────
+
+def _processar_dados(dados: Dict, fonte: str) -> Tuple[List[Dict], List[Dict]]:
+    """Normaliza os dados JSON do LLM para as estruturas internas."""
     tipo_doc = dados.get("tipo_documento", "outro")
 
     if tipo_doc == "extrato_bancario":
@@ -172,14 +259,12 @@ def _processar_resposta(
 
 def _parse_json_llm(texto: str) -> Dict:
     """Extrai JSON da resposta bruta do LLM (que pode ter texto ao redor)."""
-    # Tenta parse direto
     texto = texto.strip()
     try:
         return json.loads(texto)
     except json.JSONDecodeError:
         pass
 
-    # Tenta extrair bloco JSON do markdown
     match = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", texto)
     if match:
         try:
@@ -187,7 +272,6 @@ def _parse_json_llm(texto: str) -> Dict:
         except json.JSONDecodeError:
             pass
 
-    # Tenta encontrar o primeiro { ... } válido
     match = re.search(r"\{[\s\S]+\}", texto)
     if match:
         try:
@@ -199,9 +283,22 @@ def _parse_json_llm(texto: str) -> Dict:
 
 
 def _normalizar_transacao(dado: Dict, fonte: str) -> Dict:
-    """Monta um dict de transação tipado a partir do JSON bruto do LLM."""
-    fornecedor = (dado.get("fornecedor") or "").strip()
+    """
+    Monta um dict de transação tipado a partir do JSON bruto do LLM.
+
+    Campos resultantes:
+    - fonte_pagadora: quem pagou
+    - prestador_destino: quem recebeu (era "fornecedor" no modelo antigo)
+    - numero_documento: número da NF/recibo/protocolo
+    - data: AAAA-MM-DD ou None (sem fallback silencioso para hoje)
+    """
+    # Aceita tanto o novo campo quanto o legado "fornecedor" do LLM
+    fonte_pagadora = (dado.get("fonte_pagadora") or "").strip()
+    prestador_destino = (
+        dado.get("prestador_destino") or dado.get("fornecedor") or ""
+    ).strip()
     descricao = (dado.get("descricao") or "").strip()
+    numero_documento = (dado.get("numero_documento") or "").strip()
     valor = abs(_parse_valor(dado.get("valor")))
     data = _parse_data(dado.get("data"))
     tipo = dado.get("tipo", "despesa")
@@ -210,28 +307,33 @@ def _normalizar_transacao(dado: Dict, fonte: str) -> Dict:
 
     cnpj_raw, cnpj_valido = _validar_cnpj(dado.get("cnpj"))
 
-    # Regras determinísticas têm prioridade sobre LLM
-    cat_det, tipo_det = aplicar_regras_deterministicas(fornecedor, descricao)
+    # Regras determinísticas têm prioridade sobre sugestão do LLM
+    cat_det, tipo_det = aplicar_regras_deterministicas(prestador_destino, descricao)
     if cat_det:
         categoria = cat_det
         tipo = tipo_det
     else:
-        categoria = dado.get("categoria_sugerida") or (
-            "Outras Receitas" if tipo == "receita" else "Outras Despesas"
+        # Aceita tanto "categoria" (novo prompt) quanto "categoria_sugerida" (legado)
+        categoria = (
+            dado.get("categoria")
+            or dado.get("categoria_sugerida")
+            or ("Outras Receitas" if tipo == "receita" else "Outras Despesas")
         )
 
     suspeito = (
         valor == 0.0
-        or not data
+        or data is None
         or not descricao
         or (bool(cnpj_raw) and not cnpj_valido)
     )
 
     return {
-        "data": data or date.today().isoformat(),
-        "fornecedor": fornecedor,
+        "data": data,  # None quando não encontrada — sem fallback silencioso para hoje
+        "fonte_pagadora": fonte_pagadora,
+        "prestador_destino": prestador_destino,
         "cnpj": cnpj_raw,
         "descricao": descricao,
+        "numero_documento": numero_documento,
         "valor": valor,
         "tipo": tipo,
         "categoria": categoria,
@@ -260,6 +362,8 @@ def _normalizar_movimentacao(dado: Dict, fonte: str) -> Dict:
     }
 
 
+# ── Parsers de campos ────────────────────────────────────────────────────────
+
 def _parse_valor(valor) -> float:
     """
     Converte formatos BR/US/JSON para float.
@@ -271,7 +375,6 @@ def _parse_valor(valor) -> float:
         return abs(float(valor))
 
     s = str(valor).strip()
-    # Remove prefixo monetário e espaços
     s = re.sub(r"[R$\s]", "", s)
     if not s:
         return 0.0
@@ -280,7 +383,6 @@ def _parse_valor(valor) -> float:
     tem_virgula = "," in s
 
     if tem_ponto and tem_virgula:
-        # Descobre qual é separador decimal pela posição relativa
         if s.rindex(".") > s.rindex(","):
             # US: 1,234.56
             s = s.replace(",", "")
@@ -307,6 +409,8 @@ def _parse_data(data_str) -> Optional[str]:
     if not data_str:
         return None
     s = str(data_str).strip()
+    if s.lower() in {"null", "none", ""}:
+        return None
 
     # Já está no formato ISO
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
@@ -338,14 +442,12 @@ def _validar_cnpj(cnpj_raw) -> Tuple[str, bool]:
     if not cnpj_raw:
         return ("", False)
 
-    # Remove formatação
     digitos = re.sub(r"\D", "", str(cnpj_raw))
 
     if len(digitos) != 14:
         return (digitos, False)
 
     if len(set(digitos)) == 1:
-        # CNPJ com todos dígitos iguais é inválido
         return (digitos, False)
 
     def _calcular_digito(digitos_base: str, pesos: List[int]) -> int:

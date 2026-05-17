@@ -228,17 +228,17 @@ def _criar_aba_receitas(
     wb: Workbook, receitas: List[Dict], competencia: str
 ) -> None:
     ws = wb.create_sheet("Receitas")
-    cabecalhos = ["Data", "Histórico", "Unidade/Pagador", "Categoria", "Valor", "Fonte"]
+    cabecalhos = ["Data", "Histórico", "Fonte Pagadora", "Categoria", "Valor", "Arquivo"]
     _linha_cabecalho(ws, cabecalhos)
 
-    for t in sorted(receitas, key=lambda x: x["data"]):
+    for t in sorted(receitas, key=lambda x: x.get("data") or ""):
         ws.append([
-            t["data"],
-            t["descricao"],
-            t["fornecedor"],
-            t["categoria"],
-            t["valor"],
-            t["fonte"],
+            t.get("data"),
+            t.get("descricao"),
+            t.get("fonte_pagadora") or t.get("fornecedor", ""),
+            t.get("categoria"),
+            t.get("valor"),
+            t.get("fonte"),
         ])
         ws.cell(ws.max_row, 5).number_format = _FORMATO_MOEDA
         _colorir_linha(ws, ws.max_row, _COR_RECEITA, len(cabecalhos))
@@ -250,20 +250,25 @@ def _criar_aba_despesas(
     wb: Workbook, despesas: List[Dict], competencia: str
 ) -> None:
     ws = wb.create_sheet("Despesas")
-    cabecalhos = ["Data", "Fornecedor", "CNPJ", "Histórico", "Categoria", "Valor", "Fonte"]
+    cabecalhos = [
+        "Data", "Fonte Pagadora", "Prestador/Destino", "CNPJ",
+        "Nº Doc.", "Histórico", "Categoria", "Valor", "Arquivo",
+    ]
     _linha_cabecalho(ws, cabecalhos)
 
-    for t in sorted(despesas, key=lambda x: x["data"]):
+    for t in sorted(despesas, key=lambda x: x.get("data") or ""):
         ws.append([
-            t["data"],
-            t["fornecedor"],
+            t.get("data"),
+            t.get("fonte_pagadora") or "",
+            t.get("prestador_destino") or t.get("fornecedor", ""),
             t.get("cnpj", ""),
-            t["descricao"],
-            t["categoria"],
-            t["valor"],
-            t["fonte"],
+            t.get("numero_documento", ""),
+            t.get("descricao"),
+            t.get("categoria"),
+            t.get("valor"),
+            t.get("fonte"),
         ])
-        ws.cell(ws.max_row, 6).number_format = _FORMATO_MOEDA
+        ws.cell(ws.max_row, 8).number_format = _FORMATO_MOEDA
         cor = _COR_SUSPEITO if t.get("suspeito") else _COR_DESPESA
         _colorir_linha(ws, ws.max_row, cor, len(cabecalhos))
 
@@ -277,7 +282,7 @@ def _criar_aba_extrato(
     cabecalhos = ["Data", "Descrição", "Tipo", "Valor", "Saldo", "Fonte"]
     _linha_cabecalho(ws, cabecalhos)
 
-    for m in sorted(movs, key=lambda x: x["data"]):
+    for m in sorted(movs, key=lambda x: x.get("data") or ""):
         ws.append([
             m["data"],
             m["descricao"],
@@ -312,8 +317,10 @@ def _criar_aba_conciliacao(
         bal = par["balancete"]
         ws.append([
             "🟢 Conciliado",
-            ext["data"], ext["descricao"], ext["valor"],
-            bal["data"], bal["fornecedor"], bal["valor"],
+            ext.get("data"), ext.get("descricao"), ext.get("valor"),
+            bal.get("data"),
+            bal.get("prestador_destino") or bal.get("fornecedor", ""),
+            bal.get("valor"),
             par["diff_dias"], par["diff_valor"],
         ])
         ws.cell(ws.max_row, 4).number_format = _FORMATO_MOEDA
@@ -331,7 +338,9 @@ def _criar_aba_conciliacao(
         ws.append([
             "🔵 Só no balancete",
             None, None, None,
-            t["data"], t["fornecedor"], t["valor"],
+            t.get("data"),
+            t.get("prestador_destino") or t.get("fornecedor", ""),
+            t.get("valor"),
             None, None,
         ])
         ws.cell(ws.max_row, 7).number_format = _FORMATO_MOEDA
@@ -343,34 +352,40 @@ def _criar_aba_revisar(
     wb: Workbook, suspeitos: List[Dict], competencia: str
 ) -> None:
     ws = wb.create_sheet("⚠️ Revisar")
-    cabecalhos = ["Data", "Fornecedor", "Descrição", "Valor", "Tipo", "Categoria", "Motivo", "Fonte"]
+    cabecalhos = [
+        "Data", "Fonte Pagadora", "Prestador/Destino",
+        "Descrição", "Valor", "Tipo", "Categoria", "Motivo", "Arquivo",
+    ]
     _linha_cabecalho(ws, cabecalhos)
+
+    from core.classifier import _validar_cnpj
 
     for t in suspeitos:
         motivos = []
-        if t["valor"] == 0.0:
+        if (t.get("valor") or 0.0) == 0.0:
             motivos.append("valor zero")
         if not t.get("descricao"):
             motivos.append("sem descrição")
+        # data pode ser None (ausente no doc) ou string vazia (não preenchida pelo usuário)
         if not t.get("data"):
             motivos.append("sem data")
-        if t.get("cnpj") and len(t["cnpj"]) == 14:
-            from core.classifier import _validar_cnpj
+        if t.get("cnpj") and len(t.get("cnpj", "")) == 14:
             _, valido = _validar_cnpj(t["cnpj"])
             if not valido:
                 motivos.append("CNPJ inválido")
 
         ws.append([
-            t["data"],
-            t["fornecedor"],
-            t["descricao"],
-            t["valor"],
-            t["tipo"],
-            t["categoria"],
-            "; ".join(motivos) or "suspeito",
-            t["fonte"],
+            t.get("data"),
+            t.get("fonte_pagadora") or "",
+            t.get("prestador_destino") or t.get("fornecedor", ""),
+            t.get("descricao"),
+            t.get("valor"),
+            t.get("tipo"),
+            t.get("categoria"),
+            "; ".join(motivos) or "revisar manualmente",
+            t.get("fonte"),
         ])
-        ws.cell(ws.max_row, 4).number_format = _FORMATO_MOEDA
+        ws.cell(ws.max_row, 5).number_format = _FORMATO_MOEDA
         _colorir_linha(ws, ws.max_row, _COR_SUSPEITO, len(cabecalhos))
 
     _autofit(ws, cabecalhos)
