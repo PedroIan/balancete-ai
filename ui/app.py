@@ -285,7 +285,9 @@ def _processar_arquivo(arquivo, status) -> None:
         if conteudo.tem_texto:
             status.write(f"📄 Etapa 2/3 — PDF digital: {len(conteudo.texto):,} caracteres extraídos")
             status.write("🤖 Etapa 3/3 — Classificando via LLM (gemma4:e4b)... aguarde")
-            txs, movs = extrair_de_texto(conteudo.texto, arquivo.name)
+            txs, movs, aviso = extrair_de_texto(conteudo.texto, arquivo.name)
+            if aviso:
+                status.write(f"⚠️ Documento descartado: {aviso}")
             status.write(
                 f"✅ {len(txs)} transação(ões) · {len(movs)} movimentação(ões) de extrato"
             )
@@ -307,7 +309,9 @@ def _processar_arquivo(arquivo, status) -> None:
                     status.write(
                         f"  ✅ Tesseract ({confianca:.0f}%) → 🤖 gemma4:e4b... aguarde"
                     )
-                    txs, movs = extrair_de_texto(texto_ocr, fonte)
+                    txs, movs, aviso = extrair_de_texto(texto_ocr, fonte)
+                    if aviso:
+                        status.write(f"  ⚠️ Pág. {num_pag} descartada: {aviso}")
                     status.write(
                         f"  ✅ Pág. {num_pag}: {len(txs)} transação(ões) · {len(movs)} mov."
                     )
@@ -325,7 +329,9 @@ def _processar_arquivo(arquivo, status) -> None:
                     )
                     img_reduzida = redimensionar_imagem(img_bytes, fator=0.5)
                     img_b64 = bytes_para_b64(img_reduzida)
-                    txs, movs = extrair_de_imagem(img_b64, fonte)
+                    txs, movs, aviso = extrair_de_imagem(img_b64, fonte)
+                    if aviso:
+                        status.write(f"  ⚠️ Pág. {num_pag} descartada: {aviso}")
                     status.write(
                         f"  ✅ Pág. {num_pag}: {len(txs)} transação(ões) · {len(movs)} mov."
                     )

@@ -7,6 +7,7 @@ Classificação e extração de transações via LLM local (Ollama).
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import date
 from functools import lru_cache
@@ -16,55 +17,104 @@ from typing import Dict, List, Optional, Tuple
 import ollama
 import yaml
 
-TEXTO_MODEL = "gemma4:e4b"
-VISAO_MODEL = "qwen3-vl:8b"
+# Modelos configuráveis por env var — máquinas locais variam em VRAM e modelos
+# disponíveis no Ollama.
+TEXTO_MODEL = os.getenv("BALANCETE_TEXTO_MODEL", "gemma4:e4b")
+VISAO_MODEL = os.getenv("BALANCETE_VISAO_MODEL", "qwen3-vl:8b")
 
-_PROMPT_UNIFICADO = """Você é um extrator de dados financeiros para balancetes de condomínio.
-Analise o documento e retorne APENAS um JSON válido, sem texto adicional.
+# Limite de tokens gerados — evita geração infinita quando o modelo degenera.
+LLM_NUM_PREDICT = int(os.getenv("BALANCETE_LLM_NUM_PREDICT", "4096"))
 
-Regras:
-- tipo_documento: "extrato_bancario" | "comprovante" | "recibo" | "nota_fiscal" | "outro"
-- Para extrato_bancario: retorne lista de movimentações em "movimentacoes"
-- Para outros tipos: retorne lista de transações em "transacoes"
-- Valores sempre positivos (float). Use ponto decimal.
-- Datas no formato AAAA-MM-DD.
-- tipo de transação: "receita" ou "despesa"
+# Janela de contexto. O default do Ollama (~2048) trunca extratos longos
+# silenciosamente. 8192 cobre ~12k chars de entrada; aumentar consome mais VRAM.
+LLM_NUM_CTX = int(os.getenv("BALANCETE_LLM_NUM_CTX", "8192"))
+
+# Máximo de caracteres de documento por chamada — calibrado para caber em
+# LLM_NUM_CTX junto com o prompt. Textos maiores são divididos em chunks.
+_MAX_CHARS_LLM = 12_000
+
+# Lista fechada de categorias (REGRAS_DE_NEGOCIO.md §2). O prompt instrui o LLM
+# a escolher só destas; a normalização rejeita qualquer outra.
+CATEGORIAS_DESPESA = (
+    "Pessoal e Encargos",
+    "Manutenção",
+    "Limpeza",
+    "Energia Elétrica",
+    "Água e Esgoto",
+    "Seguro",
+    "Administração",
+    "Material de Consumo",
+    "Serviços Contratados",
+    "Tributos",
+    "Outras Despesas",
+)
+CATEGORIAS_RECEITA = (
+    "Condomínio",
+    "Cota Extra",
+    "Fundo de Reserva",
+    "Multas e Juros",
+    "Taxa de Mudança",
+    "Outras Receitas",
+)
+_CATEGORIAS_VALIDAS = set(CATEGORIAS_DESPESA) | set(CATEGORIAS_RECEITA)
+
+_PROMPT_UNIFICADO = f"""Você é um extrator de dados financeiros de condomínios brasileiros.
+Identifique o tipo do documento e extraia os dados.
+Retorne APENAS um JSON válido, sem markdown e sem texto adicional.
+
+tipo_documento (escolha exatamente um):
+- "extrato_bancario": listagem de movimentações de conta bancária em um período
+- "comprovante": comprovante de pagamento efetuado (boleto, PIX, TED)
+- "recibo": confirmação de recebimento emitida pelo recebedor
+- "nota_fiscal": NF-e, NFC-e, NFS-e ou DANFE
+- "cupom_fiscal": cupom de impressora térmica (layout estreito, fonte pequena, comum em mercados e farmácias; o CNPJ costuma aparecer no rodapé)
+- "outro": documento sem dados financeiros identificáveis
 
 Formato para extrato_bancario:
-{
+{{
   "tipo_documento": "extrato_bancario",
   "movimentacoes": [
-    {
+    {{
       "data": "AAAA-MM-DD",
       "descricao": "texto",
       "valor": 0.00,
       "tipo": "credito" ou "debito",
       "saldo": 0.00 ou null
-    }
+    }}
   ]
-}
+}}
 
-Formato para comprovante/recibo/nota_fiscal:
-{
+Formato para comprovante, recibo, nota_fiscal e cupom_fiscal:
+{{
   "tipo_documento": "comprovante",
   "transacoes": [
-    {
+    {{
       "data": "AAAA-MM-DD",
-      "fornecedor": "nome",
-      "cnpj": "somente digitos ou vazio",
+      "fornecedor": "nome do estabelecimento/beneficiário",
+      "cnpj": "somente digitos ou null",
       "descricao": "texto",
       "valor": 0.00,
       "tipo": "despesa" ou "receita",
-      "categoria_sugerida": "categoria"
-    }
+      "categoria_sugerida": "uma das categorias listadas abaixo"
+    }}
   ]
-}
+}}
 
 Formato para documento sem dados:
-{
+{{
   "tipo_documento": "outro",
   "transacoes": []
-}
+}}
+
+categoria_sugerida — use EXATAMENTE uma destas:
+- Para despesa: {" | ".join(CATEGORIAS_DESPESA)}
+- Para receita: {" | ".join(CATEGORIAS_RECEITA)}
+
+Regras:
+- Comprovantes, recibos, notas fiscais e cupons fiscais são QUASE SEMPRE "despesa". Use "receita" apenas se for claramente um recebimento do condomínio (ex: taxa condominial paga por morador).
+- "credito" = entrada na conta bancária; "debito" = saída da conta bancária.
+- Valores sempre positivos (float), com ponto decimal. Datas no formato AAAA-MM-DD.
+- Não invente dados: campo ilegível ou ausente = null.
 
 Documento a analisar:
 """
@@ -101,81 +151,159 @@ def aplicar_regras_deterministicas(
     return (None, None)
 
 
-def extrair_de_texto(texto: str, fonte: str) -> Tuple[List[Dict], List[Dict]]:
+def extrair_de_texto(texto: str, fonte: str) -> Tuple[List[Dict], List[Dict], Optional[str]]:
     """
     Entry point para PDFs com texto extraível.
-    Retorna (transacoes, extrato_movs).
+    Textos maiores que _MAX_CHARS_LLM são divididos em chunks (uma chamada cada).
+    Retorna (transacoes, extrato_movs, aviso). `aviso` é None quando tudo correu bem.
     """
-    resposta = _llm_texto(texto)
-    return _processar_resposta(resposta, fonte)
+    txs: List[Dict] = []
+    movs: List[Dict] = []
+    avisos: List[str] = []
+
+    for chunk in _dividir_em_chunks(texto, _MAX_CHARS_LLM):
+        resposta = _llm_texto(chunk)
+        c_txs, c_movs, c_aviso = _processar_resposta(resposta, fonte)
+        txs.extend(c_txs)
+        movs.extend(c_movs)
+        if c_aviso:
+            avisos.append(c_aviso)
+
+    aviso = "; ".join(avisos) if avisos and not (txs or movs) else None
+    return (txs, movs, aviso)
 
 
-def extrair_de_imagem(img_b64: str, fonte: str) -> Tuple[List[Dict], List[Dict]]:
+def extrair_de_imagem(img_b64: str, fonte: str) -> Tuple[List[Dict], List[Dict], Optional[str]]:
     """
     Entry point para PDFs escaneados e imagens diretas.
-    Retorna (transacoes, extrato_movs).
+    Retorna (transacoes, extrato_movs, aviso). `aviso` é None quando tudo correu bem.
     """
     resposta = _llm_visao(img_b64)
     return _processar_resposta(resposta, fonte)
 
 
+def _dividir_em_chunks(texto: str, max_chars: int) -> List[str]:
+    """
+    Divide o texto em chunks de até max_chars, quebrando em linhas inteiras
+    para não cortar uma movimentação de extrato ao meio.
+    """
+    if len(texto) <= max_chars:
+        return [texto]
+
+    chunks: List[str] = []
+    atual: List[str] = []
+    tamanho = 0
+
+    for linha in texto.splitlines():
+        # Linha individual maior que o limite: corta à força
+        if len(linha) > max_chars:
+            linha = linha[:max_chars]
+        if tamanho + len(linha) + 1 > max_chars and atual:
+            chunks.append("\n".join(atual))
+            atual = []
+            tamanho = 0
+        atual.append(linha)
+        tamanho += len(linha) + 1
+
+    if atual:
+        chunks.append("\n".join(atual))
+    return chunks
+
+
 def _llm_texto(texto: str) -> str:
-    """Chama o modelo de texto via Ollama."""
+    """Chama o modelo de texto via Ollama com saída JSON forçada."""
     prompt = _PROMPT_UNIFICADO + texto
-    resposta = ollama.chat(
-        model=TEXTO_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        options={"temperature": 0},
-    )
-    return resposta["message"]["content"]
+    try:
+        resposta = ollama.chat(
+            model=TEXTO_MODEL,
+            format="json",
+            messages=[{"role": "user", "content": prompt}],
+            options={
+                "temperature": 0,
+                "num_predict": LLM_NUM_PREDICT,
+                "num_ctx": LLM_NUM_CTX,
+            },
+        )
+        return resposta["message"]["content"]
+    except Exception as exc:
+        raise RuntimeError(
+            f"Erro no modelo de texto ({TEXTO_MODEL}): {exc}. "
+            "Verifique se o Ollama está rodando e o modelo está instalado."
+        ) from exc
 
 
 def _llm_visao(img_b64: str) -> str:
-    """Chama o modelo de visão via Ollama com imagem em base64."""
-    resposta = ollama.chat(
-        model=VISAO_MODEL,
-        messages=[
-            {
-                "role": "user",
-                "content": _PROMPT_UNIFICADO + "Analise a imagem do documento.",
-                "images": [img_b64],
-            }
-        ],
-        options={"temperature": 0},
-    )
-    return resposta["message"]["content"]
+    """Chama o modelo de visão via Ollama com imagem em base64 e saída JSON forçada."""
+    try:
+        resposta = ollama.chat(
+            model=VISAO_MODEL,
+            format="json",
+            messages=[
+                {
+                    "role": "user",
+                    "content": _PROMPT_UNIFICADO + "Analise a imagem do documento.",
+                    "images": [img_b64],
+                }
+            ],
+            options={
+                "temperature": 0,
+                "num_predict": LLM_NUM_PREDICT,
+                "num_ctx": LLM_NUM_CTX,
+            },
+        )
+        return resposta["message"]["content"]
+    except Exception as exc:
+        raise RuntimeError(
+            f"Erro no modelo de visão ({VISAO_MODEL}): {exc}. "
+            "Verifique se o Ollama está rodando e o modelo está instalado."
+        ) from exc
 
 
 def _processar_resposta(
     resposta_bruta: str, fonte: str
-) -> Tuple[List[Dict], List[Dict]]:
-    """Parseia o JSON do LLM e normaliza para as estruturas internas."""
+) -> Tuple[List[Dict], List[Dict], Optional[str]]:
+    """
+    Parseia o JSON do LLM e normaliza para as estruturas internas.
+    Retorna (transacoes, extrato_movs, aviso) — aviso preenchido quando o
+    documento foi descartado (JSON inválido ou tipo "outro"), para a UI
+    sinalizar em vez de descartar silenciosamente.
+    """
     dados = _parse_json_llm(resposta_bruta)
+    if dados is None:
+        return ([], [], "resposta do modelo não é um JSON interpretável")
+
     tipo_doc = dados.get("tipo_documento", "outro")
 
     if tipo_doc == "extrato_bancario":
         movs = [
             _normalizar_movimentacao(m, fonte)
             for m in dados.get("movimentacoes", [])
+            if isinstance(m, dict)
         ]
-        return ([], movs)
+        return ([], movs, None)
 
-    if tipo_doc in {"comprovante", "recibo", "nota_fiscal"}:
+    if tipo_doc in {"comprovante", "recibo", "nota_fiscal", "cupom_fiscal"}:
         txs = [
             _normalizar_transacao(t, fonte)
             for t in dados.get("transacoes", [])
+            if isinstance(t, dict)
         ]
-        return (txs, [])
+        return (txs, [], None)
 
-    return ([], [])
+    return ([], [], 'documento classificado como "outro" — nenhum dado financeiro identificado')
 
 
-def _parse_json_llm(texto: str) -> Dict:
-    """Extrai JSON da resposta bruta do LLM (que pode ter texto ao redor)."""
+def _parse_json_llm(texto: str) -> Optional[Dict]:
+    """
+    Extrai JSON da resposta bruta do LLM (que pode ter texto ao redor).
+    Retorna None quando nenhuma estratégia produz um JSON válido.
+    """
     # Tenta parse direto
     texto = texto.strip()
     try:
-        return json.loads(texto)
+        dados = json.loads(texto)
+        if isinstance(dados, dict):
+            return dados
     except json.JSONDecodeError:
         pass
 
@@ -183,7 +311,9 @@ def _parse_json_llm(texto: str) -> Dict:
     match = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", texto)
     if match:
         try:
-            return json.loads(match.group(1))
+            dados = json.loads(match.group(1))
+            if isinstance(dados, dict):
+                return dados
         except json.JSONDecodeError:
             pass
 
@@ -191,11 +321,13 @@ def _parse_json_llm(texto: str) -> Dict:
     match = re.search(r"\{[\s\S]+\}", texto)
     if match:
         try:
-            return json.loads(match.group(0))
+            dados = json.loads(match.group(0))
+            if isinstance(dados, dict):
+                return dados
         except json.JSONDecodeError:
             pass
 
-    return {"tipo_documento": "outro", "transacoes": []}
+    return None
 
 
 def _normalizar_transacao(dado: Dict, fonte: str) -> Dict:
@@ -216,9 +348,13 @@ def _normalizar_transacao(dado: Dict, fonte: str) -> Dict:
         categoria = cat_det
         tipo = tipo_det
     else:
-        categoria = dado.get("categoria_sugerida") or (
-            "Outras Receitas" if tipo == "receita" else "Outras Despesas"
-        )
+        # Categoria do LLM só vale se estiver na lista fechada — modelos
+        # pequenos inventam variações ("Energia", "Luz") que poluem o XLSX.
+        categoria_llm = (dado.get("categoria_sugerida") or "").strip()
+        if categoria_llm in _CATEGORIAS_VALIDAS:
+            categoria = categoria_llm
+        else:
+            categoria = "Outras Receitas" if tipo == "receita" else "Outras Despesas"
 
     suspeito = (
         valor == 0.0
