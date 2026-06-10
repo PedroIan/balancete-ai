@@ -55,8 +55,15 @@ def extrair_conteudo_pdf(caminho: str | Path) -> ConteudoPDF:
             total_paginas=1,
         )
 
-    # PDF — always convert pages to images for the image extraction pipeline
     total = _contar_paginas(caminho)
+
+    # Caminho híbrido: PDF digital (texto embutido) vai direto ao modelo de
+    # texto — muito mais rápido e preciso que OCR/visão em máquina local.
+    # Só PDFs escaneados (texto abaixo do limiar) viram imagem.
+    texto = _extrair_texto(caminho)
+    if len(texto.strip()) >= _LIMIAR_CHARS_POR_PAGINA * max(total, 1):
+        return ConteudoPDF(texto=texto, imagens=[], total_paginas=total)
+
     imagens = _pdf_para_imagens(caminho)
     return ConteudoPDF(texto="", imagens=imagens, total_paginas=total)
 
@@ -105,18 +112,29 @@ def _extrair_texto(caminho: Path) -> str:
 
 
 def _pdf_para_imagens(caminho: Path, dpi: int = DPI_PADRAO) -> List[Tuple[int, bytes]]:
-    """Converte cada página do PDF em PNG (página por página para evitar OOM)."""
+    """
+    Converte cada página do PDF em PNG, uma página por vez — um PDF de 30
+    páginas a 300 DPI materializado de uma vez estoura a RAM de máquinas locais.
+    Levanta RuntimeError com mensagem acionável em vez de retornar lista vazia.
+    """
     pdf_bytes = caminho.read_bytes()
+    total = _contar_paginas(caminho)
     resultado: List[Tuple[int, bytes]] = []
 
     try:
-        paginas = convert_from_bytes(pdf_bytes, dpi=dpi, fmt="png")
-        for num, pagina in enumerate(paginas, start=1):
-            buf = io.BytesIO()
-            pagina.save(buf, format="PNG")
-            resultado.append((num, buf.getvalue()))
-    except Exception:
-        pass
+        for num in range(1, max(total, 1) + 1):
+            paginas = convert_from_bytes(
+                pdf_bytes, dpi=dpi, fmt="png", first_page=num, last_page=num
+            )
+            for pagina in paginas:
+                buf = io.BytesIO()
+                pagina.save(buf, format="PNG")
+                resultado.append((num, buf.getvalue()))
+    except Exception as exc:
+        raise RuntimeError(
+            f"Falha ao converter PDF em imagens (página {len(resultado) + 1}): {exc}. "
+            "Verifique se o poppler está instalado."
+        ) from exc
 
     return resultado
 
