@@ -7,7 +7,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.conciliacao import conciliar
+import io
+
+import openpyxl
+
+from core.conciliacao import conciliar, gerar_xlsx
 
 
 def test_conciliacao_basica():
@@ -60,8 +64,37 @@ def test_conciliacao_sem_par():
     print("✅ test_conciliacao_sem_par passou")
 
 
+def test_receita_suspeita_listada():
+    """Receita suspeita deve aparecer na aba Receitas (entra no total) E na aba Revisar."""
+    transacoes = [
+        {"data": "2026-05-05", "descricao": "Taxa condominial 101", "fornecedor": "APTO 101",
+         "valor": 600.00, "tipo": "receita", "categoria": "Condomínio", "cnpj": "",
+         "suspeito": False, "fonte": "rec1.pdf"},
+        {"data": "2026-05-06", "descricao": "", "fornecedor": "APTO 102",
+         "valor": 600.00, "tipo": "receita", "categoria": "Condomínio", "cnpj": "",
+         "suspeito": True, "fonte": "rec2.pdf"},
+    ]
+    xlsx = gerar_xlsx(transacoes, [], "2026-05", 1000.0)
+    wb = openpyxl.load_workbook(io.BytesIO(xlsx))
+
+    ws_rec = wb["Receitas"]
+    # Cabeçalho + 2 receitas (inclusive a suspeita)
+    assert ws_rec.max_row == 3, f"Esperava 3 linhas na aba Receitas, obteve {ws_rec.max_row}"
+
+    assert "⚠️ Revisar" in wb.sheetnames
+
+    # Total de receitas no Resumo inclui a suspeita: 600 + 600 = 1200
+    ws_resumo = wb["Resumo"]
+    valores = {ws_resumo.cell(r, 1).value: ws_resumo.cell(r, 2).value for r in range(2, 6)}
+    assert valores["(+) Total Receitas"] == 1200.00
+    assert valores["= Saldo Final"] == 2200.00
+
+    print("✅ test_receita_suspeita_listada passou")
+
+
 if __name__ == "__main__":
     test_conciliacao_basica()
     test_conciliacao_tolerancia()
     test_conciliacao_sem_par()
+    test_receita_suspeita_listada()
     print("\n✅ Todos os testes de conciliação passaram")

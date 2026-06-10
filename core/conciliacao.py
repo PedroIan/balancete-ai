@@ -52,20 +52,20 @@ def gerar_xlsx(
     wb = Workbook()
     wb.remove(wb.active)  # remove aba padrão vazia
 
-    ok, suspeitos = separar_suspeitos(transacoes)
-    receitas = [t for t in ok if t["tipo"] == "receita"]
-    despesas = [t for t in ok if t["tipo"] == "despesa"]
-    # suspeitos entram nos totais mas aparecem também na aba Revisar
-    receitas_total = sum(t["valor"] for t in ok + suspeitos if t["tipo"] == "receita")
-    despesas_total = sum(t["valor"] for t in ok + suspeitos if t["tipo"] == "despesa")
+    _, suspeitos = separar_suspeitos(transacoes)
+    # Suspeitas entram nos totais e nas abas de listagem (destacadas em
+    # amarelo), e aparecem também na aba Revisar — a aba é informativa,
+    # nunca exclui valores do balancete.
+    receitas_completas = [t for t in transacoes if t["tipo"] == "receita"]
+    despesas_completas = [t for t in transacoes if t["tipo"] == "despesa"]
+    receitas_total = sum(t["valor"] for t in receitas_completas)
+    despesas_total = sum(t["valor"] for t in despesas_completas)
     saldo_final = saldo_inicial + receitas_total - despesas_total
 
     _criar_aba_resumo(wb, competencia, saldo_inicial, receitas_total, despesas_total, saldo_final, transacoes)
 
-    if receitas:
-        _criar_aba_receitas(wb, receitas, competencia)
-
-    despesas_completas = [t for t in transacoes if t["tipo"] == "despesa"]
+    if receitas_completas:
+        _criar_aba_receitas(wb, receitas_completas, competencia)
     if despesas_completas:
         _criar_aba_despesas(wb, despesas_completas, competencia)
 
@@ -241,7 +241,8 @@ def _criar_aba_receitas(
             t["fonte"],
         ])
         ws.cell(ws.max_row, 5).number_format = _FORMATO_MOEDA
-        _colorir_linha(ws, ws.max_row, _COR_RECEITA, len(cabecalhos))
+        cor = _COR_SUSPEITO if t.get("suspeito") else _COR_RECEITA
+        _colorir_linha(ws, ws.max_row, cor, len(cabecalhos))
 
     _autofit(ws, cabecalhos)
 
