@@ -18,11 +18,16 @@ def test_regras():
     assert aplicar_regras_deterministicas(None, "INSS COMPETÊNCIA 03/2026") == ("Pessoal e Encargos", "despesa")
     assert aplicar_regras_deterministicas(None, "TAXA DE MUDANÇA APTO 301") == ("Taxa de Mudança", "receita")
     assert aplicar_regras_deterministicas(None, "MULTA CONDOMINIAL APTO 102") == ("Multas e Juros", "receita")
+    assert aplicar_regras_deterministicas(None, "GPS COMPETENCIA 03/2026") == ("Pessoal e Encargos", "despesa")
+    assert aplicar_regras_deterministicas("HIGISERV", "MATERIAL DE LIMPEZA") == ("Material de Consumo", "despesa")
+    assert aplicar_regras_deterministicas(None, "FAXINA AREAS COMUNS") == ("Limpeza", "despesa")
+    assert aplicar_regras_deterministicas(None, "INSTALACAO ELETRICA GARAGEM") == ("Manutenção", "despesa")
 
     # Falsos positivos que NÃO devem bater
     assert aplicar_regras_deterministicas(None, "PORTARIA VIRTUAL")[0] != "Pessoal e Encargos"
     assert aplicar_regras_deterministicas(None, "MULTA CONTRATUAL CONSTRUTORA")[0] != "Multas e Juros"
     assert aplicar_regras_deterministicas(None, "MUDANÇA DE LAYOUT HALL")[0] != "Taxa de Mudança"
+    assert aplicar_regras_deterministicas(None, "GPS RASTREAMENTO VEICULAR")[0] != "Pessoal e Encargos"
 
     print("✅ test_regras passou")
 
