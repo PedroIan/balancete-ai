@@ -7,10 +7,13 @@ from __future__ import annotations
 
 import base64
 import io
+import os
+import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import pdfplumber
 from pdf2image import convert_from_bytes
@@ -111,6 +114,23 @@ def _extrair_texto(caminho: Path) -> str:
     return "\n".join(partes)
 
 
+def _resolver_poppler_path() -> Optional[str]:
+    """
+    Retorna o diretório dos binários do Poppler para passar ao pdf2image.
+    Prioridade: variável de ambiente POPPLER_PATH → busca via shutil.which.
+    No Windows o pdf2image às vezes não encontra o Poppler mesmo com PATH
+    correto no terminal; resolver explicitamente contorna esse comportamento.
+    """
+    env = os.environ.get("POPPLER_PATH")
+    if env:
+        return env
+    if sys.platform == "win32":
+        exe = shutil.which("pdftoppm") or shutil.which("pdfinfo")
+        if exe:
+            return str(Path(exe).parent)
+    return None
+
+
 def _pdf_para_imagens(caminho: Path, dpi: int = DPI_PADRAO) -> List[Tuple[int, bytes]]:
     """
     Converte cada página do PDF em PNG, uma página por vez — um PDF de 30
@@ -120,11 +140,13 @@ def _pdf_para_imagens(caminho: Path, dpi: int = DPI_PADRAO) -> List[Tuple[int, b
     pdf_bytes = caminho.read_bytes()
     total = _contar_paginas(caminho)
     resultado: List[Tuple[int, bytes]] = []
+    poppler_path = _resolver_poppler_path()
 
     try:
         for num in range(1, max(total, 1) + 1):
             paginas = convert_from_bytes(
-                pdf_bytes, dpi=dpi, fmt="png", first_page=num, last_page=num
+                pdf_bytes, dpi=dpi, fmt="png", first_page=num, last_page=num,
+                poppler_path=poppler_path,
             )
             for pagina in paginas:
                 buf = io.BytesIO()
