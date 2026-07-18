@@ -6,6 +6,15 @@ Não contém lógica de negócio: toda computação é delegada a core/.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path as _Path
+
+# Garante que a raiz do projeto está no sys.path independente do diretório de
+# trabalho — necessário quando streamlit é invocado fora da raiz.
+_ROOT = _Path(__file__).parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 import math
 import os
 import re
