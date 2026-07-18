@@ -14,7 +14,7 @@ regras:
     tipo: despesa
 
   # ── Pessoal e Encargos ────────────────────────────────────────────────────────
-  - padrao: "FOLHA DE PAGAMENTO|\\bFGTS\\b|\\bINSS\\b|\\bGPS\\b|\\bDARF\\b|RESCISAO|RESCISÃO|FERIAS|FÉRIAS|13.*SALARIO|13.*SALÁRIO|VALE.TRANSPORTE|VALE.ALIMENTACAO|VALE.ALIMENTAÇÃO|\\bSALARIO\\b|\\bSALÁRIO\\b|PRO.LABORE|PRÓ.LABORE"
+  - padrao: "FOLHA DE PAGAMENTO|\\bFGTS\\b|\\bINSS\\b|\\bGPS\\b(?!\\s+(RASTREA|TRACKER|VEICULAR))|\\bDARF\\b|RESCISAO|RESCISÃO|\\bFERIAS\\b|\\bFÉRIAS\\b|13.*SALARIO|13.*SALÁRIO|VALE.TRANSPORTE|VALE.ALIMENTACAO|VALE.ALIMENTAÇÃO|\\bSALARIO\\b|\\bSALÁRIO\\b|PRO.LABORE|PRÓ.LABORE"
     categoria: "Pessoal e Encargos"
     tipo: despesa
 
@@ -58,17 +58,17 @@ regras:
     categoria: "Serviços Contratados"
     tipo: despesa
 
+  # ── Material de Consumo — antes de Limpeza: "MATERIAL DE LIMPEZA" é consumo ──
+  - padrao: "MATERIAL DE LIMPEZA|MATERIAL DE CONSUMO|PAPELARIA|SUPRIMENTO|EPI\\b"
+    categoria: "Material de Consumo"
+    tipo: despesa
+
   # ── Limpeza ──────────────────────────────────────────────────────────────────
   - padrao: "DEDETIZA|DESINSETIZA|DESCUPINIZA|DESINFEC|\\bFAXINA\\b|ZELADORIA|LIMPEZA"
     categoria: "Limpeza"
     tipo: despesa
 
   # ── Manutenção ───────────────────────────────────────────────────────────────
-  - padrao: "MANUT[EÊ]N|ELEVADOR|\\bBOMBA\\b|PINTURA|REFORMA|INSTALAC|INSTALAÇÃO|CONSERTO|REPARO|HIDRA[UÚ]LICA|ELETRICA|ELÉTRICA"
+  - padrao: "MANUT[EÊ]N|ELEVADOR|\\bBOMBA\\b|PINTURA|REFORMA|INSTALAC|INSTALAÇÃO|CONSERTO|REPARO|HIDRA[UÚ]LICA|\\bELETRICA\\b|\\bELÉTRICA\\b"
     categoria: "Manutenção"
-    tipo: despesa
-
-  # ── Material de Consumo ──────────────────────────────────────────────────────
-  - padrao: "MATERIAL DE LIMPEZA|MATERIAL DE CONSUMO|PAPELARIA|SUPRIMENTO|EPI\\b"
-    categoria: "Material de Consumo"
     tipo: despesa

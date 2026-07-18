@@ -6,6 +6,7 @@ Não contém lógica de negócio: toda computação é delegada a core/.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import shutil
@@ -18,7 +19,7 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 import streamlit as st
 
-from core.classifier import extrair_de_imagem, extrair_de_texto
+from core.classifier import TEXTO_MODEL, VISAO_MODEL, extrair_de_imagem, extrair_de_texto
 from core.conciliacao import gerar_xlsx, preencher_template
 from core.extractor import (
     ConteudoPDF,
@@ -31,23 +32,15 @@ from core.extractor import (
     redimensionar_imagem,
 )
 
-# Diretório de cache para imagens de PDFs escaneados
 _CACHE_DIR = Path.home() / ".balancete_cache" / "imagens"
 _CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# ── Ponto de entrada ─────────────────────────────────────────────────────────
-
 def main() -> None:
-    st.set_page_config(
-        page_title="Balancete Condominial",
-        page_icon="🏢",
-        layout="wide",
-    )
+    st.set_page_config(page_title="Balancete Condominial", page_icon="🏢", layout="wide")
     st.title("🏢 Balancete Condominial")
     st.caption("Processamento 100% local — nenhum dado sai da sua máquina.")
 
-    # Estado da sessão
     if "tela" not in st.session_state:
         st.session_state.tela = "configuracao"
     if "dados_extraidos" not in st.session_state:
@@ -70,18 +63,9 @@ def _tela_configuracao() -> None:
 
     col1, col2 = st.columns(2)
     with col1:
-        competencia = st.text_input(
-            "Competência (AAAA-MM)",
-            placeholder="Ex: 2026-05",
-            help="Mês de referência do balancete no formato AAAA-MM.",
-        )
+        competencia = st.text_input("Competência (AAAA-MM)", placeholder="Ex: 2026-05")
     with col2:
-        saldo_inicial = st.number_input(
-            "Saldo inicial (R$)",
-            min_value=0.0,
-            step=0.01,
-            format="%.2f",
-        )
+        saldo_inicial = st.number_input("Saldo inicial (R$)", min_value=0.0, step=0.01, format="%.2f")
 
     arquivos = st.file_uploader(
         "Documentos financeiros",
@@ -89,12 +73,7 @@ def _tela_configuracao() -> None:
         accept_multiple_files=True,
         help="Extratos bancários, comprovantes, recibos e notas fiscais.",
     )
-
-    template = st.file_uploader(
-        "Template XLSX personalizado (opcional)",
-        type=["xlsx"],
-        help="Modelo da sua administradora com placeholders {{competencia}}, {{saldo_inicial}}, etc.",
-    )
+    template = st.file_uploader("Template XLSX personalizado (opcional)", type=["xlsx"])
 
     if st.button("Processar documentos", type="primary", disabled=not arquivos):
         erro = _validar_competencia(competencia)
@@ -102,11 +81,11 @@ def _tela_configuracao() -> None:
             st.error(erro)
             return
 
-        # Limpa estado anterior
+        shutil.rmtree(_CACHE_DIR, ignore_errors=True)
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
         st.session_state.dados_extraidos = {
-            "transacoes": [],
-            "extrato_movs": [],
-            "caminhos_imagens": [],
+            "transacoes": [], "extrato_movs": [], "caminhos_imagens": [], "status_docs": [],
         }
         st.session_state.competencia = competencia
         st.session_state.saldo_inicial = saldo_inicial
@@ -114,32 +93,37 @@ def _tela_configuracao() -> None:
 
         total = len(arquivos)
         progresso = st.progress(0.0, text=f"0 de {total} arquivo(s) processado(s)")
+        status_docs: List[Dict] = []
 
         for idx, arquivo in enumerate(arquivos):
-            with st.status(
-                f"📄 [{idx + 1}/{total}] {arquivo.name}", expanded=True
-            ) as status:
+            entrada = {"Arquivo": arquivo.name, "Resultado": "❌ Falha", "Transações": 0, "Mov. Extrato": 0, "Detalhe": ""}
+            with st.status(f"📄 [{idx + 1}/{total}] {arquivo.name}", expanded=True) as status:
                 try:
-                    _processar_arquivo(arquivo, status)
-                    status.update(
-                        label=f"✅ [{idx + 1}/{total}] {arquivo.name}",
-                        state="complete",
-                        expanded=False,
-                    )
+                    n_txs, n_movs, avisos = _processar_arquivo(arquivo, status)
+                    entrada["Transações"] = n_txs
+                    entrada["Mov. Extrato"] = n_movs
+                    if avisos:
+                        entrada["Resultado"] = "⚠️ Atenção"
+                        entrada["Detalhe"] = "; ".join(avisos)
+                        icone = "⚠️"
+                    elif n_txs == 0 and n_movs == 0:
+                        entrada["Resultado"] = "⚠️ Atenção"
+                        entrada["Detalhe"] = "nenhum dado extraído"
+                        icone = "⚠️"
+                    else:
+                        entrada["Resultado"] = "✅ OK"
+                        icone = "✅"
+                    status.update(label=f"{icone} [{idx + 1}/{total}] {arquivo.name}", state="complete", expanded=False)
                 except Exception as e:
-                    status.update(
-                        label=f"❌ [{idx + 1}/{total}] {arquivo.name} — erro",
-                        state="error",
-                        expanded=True,
-                    )
+                    entrada["Detalhe"] = str(e)
+                    status.update(label=f"❌ [{idx + 1}/{total}] {arquivo.name} — erro", state="error", expanded=True)
                     status.write(f"Detalhe: {e}")
 
-            progresso.progress(
-                (idx + 1) / total,
-                text=f"{idx + 1} de {total} arquivo(s) processado(s)",
-            )
+            status_docs.append(entrada)
+            progresso.progress((idx + 1) / total, text=f"{idx + 1} de {total} arquivo(s) processado(s)")
 
-        # Deduplicação
+        st.session_state.dados_extraidos["status_docs"] = status_docs
+
         with st.status("🔄 Deduplicando transações...", expanded=False) as s_dedup:
             txs = st.session_state.dados_extraidos["transacoes"]
             antes = len(txs)
@@ -171,21 +155,34 @@ def _tela_revisao() -> None:
             st.session_state.tela = "configuracao"
             st.rerun()
 
+    status_docs = dados.get("status_docs", [])
+    if status_docs:
+        n_ok = sum(1 for s in status_docs if s["Resultado"] == "✅ OK")
+        n_atencao = len(status_docs) - n_ok
+        with st.expander(
+            f"📋 Resumo do processamento — {n_ok} OK · {n_atencao} com atenção/falha",
+            expanded=(n_atencao > 0),
+        ):
+            st.dataframe(pd.DataFrame(status_docs), use_container_width=True, hide_index=True)
+
     if not transacoes and not extrato_movs:
         st.warning("Nenhum dado extraído. Verifique os documentos enviados.")
         return
+
+    pendencias: List[Dict] = []
+    gerar_mesmo_assim = False
 
     tab_tx, tab_ext = st.tabs(["Transações", "Extrato (Referência)"])
 
     with tab_tx:
         if transacoes:
             df_tx = pd.DataFrame(transacoes)
-            # Marca linhas suspeitas com emoji
             if "suspeito" in df_tx.columns:
                 df_tx["⚠️"] = df_tx["suspeito"].apply(lambda s: "⚠️" if s else "")
             colunas_editor = [
                 "⚠️", "data", "tipo", "valor", "categoria",
-                "fornecedor", "cnpj", "descricao", "fonte",
+                "fonte_pagadora", "prestador_destino", "cnpj",
+                "numero_documento", "descricao", "fonte",
             ]
             colunas_editor = [c for c in colunas_editor if c in df_tx.columns]
 
@@ -197,11 +194,15 @@ def _tela_revisao() -> None:
                     "valor": st.column_config.NumberColumn("Valor (R$)", format="%.2f"),
                     "data": st.column_config.TextColumn("Data (AAAA-MM-DD)"),
                     "tipo": st.column_config.SelectboxColumn("Tipo", options=["receita", "despesa"]),
+                    "fonte_pagadora": st.column_config.TextColumn("Fonte Pagadora"),
+                    "prestador_destino": st.column_config.TextColumn("Prestador/Destino"),
+                    "numero_documento": st.column_config.TextColumn("Nº Doc."),
                     "⚠️": st.column_config.TextColumn("⚠️", disabled=True, width="small"),
                 },
                 key="editor_transacoes",
             )
             st.session_state.dados_extraidos["transacoes_editadas"] = editado.to_dict("records")
+            pendencias = _calcular_pendencias(editado.to_dict("records"))
         else:
             st.info("Nenhuma transação extraída.")
             st.session_state.dados_extraidos["transacoes_editadas"] = []
@@ -213,18 +214,25 @@ def _tela_revisao() -> None:
         else:
             st.info("Nenhum extrato bancário enviado.")
 
-    # Alerta de transações fora da competência
     if transacoes and competencia:
         ano_mes = competencia[:7]
         fora = [t for t in transacoes if t.get("data") and not t["data"].startswith(ano_mes)]
         if fora:
-            st.warning(
-                f"⚠️ {len(fora)} transação(ões) com data fora da competência {competencia}. "
-                "Verifique na tabela acima."
-            )
+            st.warning(f"⚠️ {len(fora)} transação(ões) com data fora da competência {competencia}.")
+
+    if pendencias:
+        st.error(
+            f"**{len(pendencias)} transação(ões) com campos obrigatórios em branco.** "
+            "Corrija na tabela acima ou marque que deseja gerar mesmo assim."
+        )
+        st.dataframe(pd.DataFrame(pendencias), use_container_width=True, hide_index=True)
+        gerar_mesmo_assim = st.checkbox(
+            "⚠️ Entendo que há transações incompletas e desejo gerar o balancete mesmo assim"
+        )
 
     with col_confirmar:
-        if st.button("✅ Confirmar e gerar XLSX", type="primary"):
+        pode_confirmar = not pendencias or gerar_mesmo_assim
+        if st.button("✅ Confirmar e gerar XLSX", type="primary", disabled=not pode_confirmar):
             _gerar_resultado()
             st.session_state.tela = "download"
             st.rerun()
@@ -271,26 +279,32 @@ def _tela_download() -> None:
 
 # ── Funções auxiliares ───────────────────────────────────────────────────────
 
-def _processar_arquivo(arquivo, status) -> None:
-    """Extrai conteúdo e classifica um único arquivo. `status` é o st.status() ativo."""
+def _processar_arquivo(arquivo, status) -> Tuple[int, int, List[str]]:
     status.write("🔍 Etapa 1/3 — Detectando tipo de documento...")
 
     with tempfile.NamedTemporaryFile(suffix=Path(arquivo.name).suffix, delete=False) as tmp:
         tmp.write(arquivo.read())
         tmp_path = Path(tmp.name)
 
+    n_txs = 0
+    n_movs = 0
+    avisos: List[str] = []
+
     try:
         conteudo: ConteudoPDF = extrair_conteudo_pdf(tmp_path)
 
         if conteudo.tem_texto:
             status.write(f"📄 Etapa 2/3 — PDF digital: {len(conteudo.texto):,} caracteres extraídos")
-            status.write("🤖 Etapa 3/3 — Classificando via LLM (gemma4:e4b)... aguarde")
-            txs, movs = extrair_de_texto(conteudo.texto, arquivo.name)
-            status.write(
-                f"✅ {len(txs)} transação(ões) · {len(movs)} movimentação(ões) de extrato"
-            )
+            status.write(f"🤖 Etapa 3/3 — Classificando via LLM ({TEXTO_MODEL})... aguarde")
+            txs, movs, aviso = extrair_de_texto(conteudo.texto, arquivo.name)
+            if aviso:
+                status.write(f"⚠️ Documento descartado: {aviso}")
+                avisos.append(aviso)
+            status.write(f"✅ {len(txs)} transação(ões) · {len(movs)} movimentação(ões) de extrato")
             st.session_state.dados_extraidos["transacoes"].extend(txs)
             st.session_state.dados_extraidos["extrato_movs"].extend(movs)
+            n_txs += len(txs)
+            n_movs += len(movs)
 
         elif conteudo.imagens:
             n_pags = len(conteudo.imagens)
@@ -304,47 +318,39 @@ def _processar_arquivo(arquivo, status) -> None:
                 texto_ocr, confianca = ocr_com_tesseract(img_bytes)
 
                 if confianca >= _TESSERACT_CONFIANCA_MIN and len(texto_ocr) >= _TESSERACT_CHARS_MIN:
-                    status.write(
-                        f"  ✅ Tesseract ({confianca:.0f}%) → 🤖 gemma4:e4b... aguarde"
-                    )
-                    txs, movs = extrair_de_texto(texto_ocr, fonte)
-                    status.write(
-                        f"  ✅ Pág. {num_pag}: {len(txs)} transação(ões) · {len(movs)} mov."
-                    )
+                    status.write(f"  ✅ Tesseract ({confianca:.0f}%) → 🤖 {TEXTO_MODEL}... aguarde")
+                    txs, movs, aviso = extrair_de_texto(texto_ocr, fonte)
                 else:
                     motivo = (
                         f"confiança {confianca:.0f}% < {_TESSERACT_CONFIANCA_MIN:.0f}%"
-                        if texto_ocr
-                        else "Tesseract indisponível"
+                        if texto_ocr else "Tesseract indisponível"
                     )
-                    # Reduz de 300 DPI para 150 DPI antes de enviar ao qwen3-vl:
-                    # o modelo de visão não precisa de alta resolução e imagens menores
-                    # reduzem memória e latência na chamada ao Ollama.
-                    status.write(
-                        f"  🔄 {motivo} → reduzindo para 150 DPI → 🤖 qwen3-vl:8b... aguarde"
-                    )
+                    status.write(f"  🔄 {motivo} → reduzindo para 150 DPI → 🤖 {VISAO_MODEL}... aguarde")
                     img_reduzida = redimensionar_imagem(img_bytes, fator=0.5)
                     img_b64 = bytes_para_b64(img_reduzida)
-                    txs, movs = extrair_de_imagem(img_b64, fonte)
-                    status.write(
-                        f"  ✅ Pág. {num_pag}: {len(txs)} transação(ões) · {len(movs)} mov."
-                    )
+                    txs, movs, aviso = extrair_de_imagem(img_b64, fonte)
 
+                if aviso:
+                    status.write(f"  ⚠️ Pág. {num_pag} descartada: {aviso}")
+                    avisos.append(f"pág. {num_pag}: {aviso}")
+                status.write(f"  ✅ Pág. {num_pag}: {len(txs)} transação(ões) · {len(movs)} mov.")
                 st.session_state.dados_extraidos["transacoes"].extend(txs)
                 st.session_state.dados_extraidos["extrato_movs"].extend(movs)
+                n_txs += len(txs)
+                n_movs += len(movs)
 
         else:
             status.write("⚠️ Nenhum conteúdo extraível neste documento")
+            avisos.append("nenhum conteúdo extraível")
     finally:
         tmp_path.unlink(missing_ok=True)
 
+    return (n_txs, n_movs, avisos)
+
 
 def _gerar_resultado() -> None:
-    """Reconstrói transações editadas e chama conciliacao para gerar o XLSX."""
     dados = st.session_state.dados_extraidos
     txs_editadas = dados.get("transacoes_editadas", dados.get("transacoes", []))
-
-    # Reconstrói transações a partir dos dados editados, recalculando suspeito
     transacoes = _reconstruir_transacoes(txs_editadas)
     extrato_movs = dados.get("extrato_movs", [])
     competencia = st.session_state.get("competencia", "")
@@ -355,20 +361,59 @@ def _gerar_resultado() -> None:
         xlsx = preencher_template(template_bytes, transacoes, extrato_movs, competencia, saldo_inicial)
     else:
         xlsx = gerar_xlsx(transacoes, extrato_movs, competencia, saldo_inicial)
-
     st.session_state.resultado = {"xlsx": xlsx}
 
 
+def _num_seguro(valor) -> float:
+    try:
+        f = float(valor)
+        return 0.0 if f != f else f  # NaN != NaN
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _texto_seguro(valor) -> str:
+    if valor is None or valor != valor:
+        return ""
+    return str(valor).strip()
+
+
+def _calcular_pendencias(txs_editadas: List[Dict]) -> List[Dict]:
+    pendencias: List[Dict] = []
+    for idx, t in enumerate(txs_editadas):
+        if _linha_vazia(t):
+            continue
+        faltando = []
+        if not _texto_seguro(t.get("data")):
+            faltando.append("data")
+        if _num_seguro(t.get("valor")) == 0.0:
+            faltando.append("valor")
+        if not _texto_seguro(t.get("descricao")):
+            faltando.append("descrição")
+        if faltando:
+            pendencias.append({"Linha": idx + 1, "Arquivo": _texto_seguro(t.get("fonte")), "Campos faltando": ", ".join(faltando)})
+    return pendencias
+
+
+def _linha_vazia(t: Dict) -> bool:
+    return (
+        _num_seguro(t.get("valor")) == 0.0
+        and not _texto_seguro(t.get("descricao"))
+        and not _texto_seguro(t.get("prestador_destino"))
+    )
+
+
 def _reconstruir_transacoes(txs_editadas: List[Dict]) -> List[Dict]:
-    """Reconstrói transações a partir dos dados do data_editor, recalculando suspeito."""
     from core.classifier import _validar_cnpj
 
     resultado = []
     for t in txs_editadas:
-        valor = abs(float(t.get("valor") or 0))
-        descricao = str(t.get("descricao") or "").strip()
-        data_str = str(t.get("data") or "").strip()
-        cnpj_raw = str(t.get("cnpj") or "").strip()
+        if _linha_vazia(t):
+            continue
+        valor = abs(_num_seguro(t.get("valor")))
+        descricao = _texto_seguro(t.get("descricao"))
+        data_str = _texto_seguro(t.get("data"))
+        cnpj_raw = _texto_seguro(t.get("cnpj"))
 
         if cnpj_raw:
             cnpj_limpo, cnpj_valido = _validar_cnpj(cnpj_raw)
@@ -384,22 +429,21 @@ def _reconstruir_transacoes(txs_editadas: List[Dict]) -> List[Dict]:
 
         resultado.append({
             "data": data_str or date.today().isoformat(),
-            "fornecedor": str(t.get("fornecedor") or "").strip(),
+            "fonte_pagadora": _texto_seguro(t.get("fonte_pagadora")),
+            "prestador_destino": _texto_seguro(t.get("prestador_destino")),
             "cnpj": cnpj_limpo,
             "descricao": descricao,
+            "numero_documento": _texto_seguro(t.get("numero_documento")),
             "valor": valor,
             "tipo": t.get("tipo", "despesa"),
-            "categoria": str(t.get("categoria") or "Outras Despesas").strip(),
+            "categoria": _texto_seguro(t.get("categoria")) or "Outras Despesas",
             "suspeito": suspeito,
-            "fonte": str(t.get("fonte") or "").strip(),
+            "fonte": _texto_seguro(t.get("fonte")),
         })
     return resultado
 
 
-def _salvar_imagens_em_disco(
-    imagens: List[Tuple[int, bytes]], nome_arquivo: str
-) -> List[Path]:
-    """Persiste PNGs em ~/.balancete_cache/imagens/ e retorna lista de caminhos."""
+def _salvar_imagens_em_disco(imagens: List[Tuple[int, bytes]], nome_arquivo: str) -> List[Path]:
     caminhos: List[Path] = []
     base = re.sub(r"[^\w\-]", "_", Path(nome_arquivo).stem)
     for num, img_bytes in imagens:
@@ -410,16 +454,19 @@ def _salvar_imagens_em_disco(
 
 
 def _deduplicar_transacoes(transacoes: List[Dict]) -> List[Dict]:
-    """Remove duplicatas por (data, valor arredondado, fornecedor em maiúsculas, tipo)."""
     vistas: set = set()
     unicas: List[Dict] = []
     for t in transacoes:
-        chave = (
-            t.get("data", ""),
-            round(float(t.get("valor") or 0), 2),
-            str(t.get("fornecedor") or "").upper(),
-            t.get("tipo", ""),
-        )
+        num_doc = str(t.get("numero_documento") or "").strip()
+        if num_doc:
+            chave = ("doc", num_doc, t.get("tipo", ""))
+        else:
+            chave = (
+                t.get("data") or "",
+                round(float(t.get("valor") or 0), 2),
+                str(t.get("prestador_destino") or "").upper(),
+                t.get("tipo", ""),
+            )
         if chave not in vistas:
             vistas.add(chave)
             unicas.append(t)
@@ -427,7 +474,6 @@ def _deduplicar_transacoes(transacoes: List[Dict]) -> List[Dict]:
 
 
 def _validar_competencia(competencia: str) -> Optional[str]:
-    """Valida formato AAAA-MM. Retorna mensagem de erro ou None se válido."""
     if not competencia:
         return "Informe a competência no formato AAAA-MM."
     if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", competencia):
@@ -436,7 +482,6 @@ def _validar_competencia(competencia: str) -> Optional[str]:
 
 
 def _criar_zip_imagens(caminhos: List[Path]) -> Optional[bytes]:
-    """Cria um ZIP em memória com os PNGs das páginas escaneadas."""
     import io as _io
     buf = _io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
