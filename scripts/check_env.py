@@ -70,6 +70,7 @@ deps = {
     "streamlit": "streamlit",
     "ollama": "ollama",
     "pdfplumber": "pdfplumber",
+    "pymupdf": "fitz",
     "pdf2image": "pdf2image",
     "openpyxl": "openpyxl",
     "pandas": "pandas",

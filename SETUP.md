@@ -69,7 +69,13 @@ Confirme que o servidor está rodando abrindo `http://localhost:11434` no browse
    - Em **Variáveis do sistema**, `Path` → Editar → Novo
    - Cole: `C:\poppler\Library\bin`
    - OK em tudo, reabra o terminal
-4. Teste: `pdfinfo --version`
+4. Teste: `where pdfinfo`
+   Deve exibir o caminho do executável (ex: `C:\poppler\Library\bin\pdfinfo.exe`).
+   > ⚠️ `pdfinfo --version` não é suportado em todas as versões — o comando correto de teste é `where pdfinfo`.
+
+> **Se `pdfinfo` falhar silenciosamente (sem saída e sem erro):** instale o
+> **Visual C++ Redistributable 2022** — [aka.ms/vs/17/release/vc_redist.x64.exe](https://aka.ms/vs/17/release/vc_redist.x64.exe)
+> — e reinicie o computador.
 
 ---
 
@@ -317,7 +323,8 @@ streamlit run ui/app.py
 | `'ollama' is not recognized` (após reiniciar) | Instalação falhou ou Defender bloqueou | Reinstale como administrador; verifique o Histórico do Defender |
 | `'streamlit' is not recognized` | venv não está ativado | Execute o comando de ativação do venv antes |
 | `ExecutionPolicy` bloqueando o venv | Política de scripts do PowerShell | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` |
-| `Is poppler installed and in PATH?` | Poppler não está no PATH | Confirme o caminho correto; reabra o terminal |
+| `Is poppler installed and in PATH?` | Poppler não está no PATH ou DLLs ausentes | Instale o Visual C++ Redistributable 2022; confirme `where pdfinfo` no CMD |
+| `pdfinfo --version` não exibe nada | Versão sem suporte à flag `--version` | Normal — use `where pdfinfo` para confirmar a instalação |
 | `connection refused` na porta 11434 | Ollama não está rodando | Procure o ícone na bandeja ou execute `ollama serve` |
 | GPU não utilizada (100% CPU) | Driver NVIDIA desatualizado ou VRAM insuficiente | Atualize drivers; Ollama detecta CUDA automaticamente |
 | Acentos quebrados no terminal (Windows) | Codepage padrão do Windows | Execute `chcp 65001` antes de rodar o Streamlit |
