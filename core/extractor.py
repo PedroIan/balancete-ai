@@ -133,10 +133,41 @@ def _resolver_poppler_path() -> Optional[str]:
 
 def _pdf_para_imagens(caminho: Path, dpi: int = DPI_PADRAO) -> List[Tuple[int, bytes]]:
     """
-    Converte cada página do PDF em PNG, uma página por vez — um PDF de 30
-    páginas a 300 DPI materializado de uma vez estoura a RAM de máquinas locais.
+    Converte cada página do PDF em PNG.
+    Tenta PyMuPDF primeiro (sem dependências externas); se não estiver
+    instalado ou falhar, usa pdf2image + Poppler como fallback.
     Levanta RuntimeError com mensagem acionável em vez de retornar lista vazia.
     """
+    try:
+        return _pdf_para_imagens_pymupdf(caminho, dpi)
+    except ImportError:
+        pass  # PyMuPDF não instalado — tenta pdf2image
+    except Exception as exc:
+        raise RuntimeError(
+            f"Falha ao converter PDF em imagens (PyMuPDF): {exc}"
+        ) from exc
+
+    return _pdf_para_imagens_poppler(caminho, dpi)
+
+
+def _pdf_para_imagens_pymupdf(caminho: Path, dpi: int) -> List[Tuple[int, bytes]]:
+    """Converte PDF em imagens usando PyMuPDF (fitz) — sem dependências externas."""
+    import fitz  # pymupdf
+
+    resultado: List[Tuple[int, bytes]] = []
+    zoom = dpi / 72.0  # fitz usa 72 DPI como base
+    mat = fitz.Matrix(zoom, zoom)
+
+    with fitz.open(str(caminho)) as doc:
+        for num, pagina in enumerate(doc, start=1):
+            pix = pagina.get_pixmap(matrix=mat, alpha=False)
+            resultado.append((num, pix.tobytes("png")))
+
+    return resultado
+
+
+def _pdf_para_imagens_poppler(caminho: Path, dpi: int) -> List[Tuple[int, bytes]]:
+    """Converte PDF em imagens usando pdf2image + Poppler."""
     pdf_bytes = caminho.read_bytes()
     total = _contar_paginas(caminho)
     resultado: List[Tuple[int, bytes]] = []
@@ -155,7 +186,8 @@ def _pdf_para_imagens(caminho: Path, dpi: int = DPI_PADRAO) -> List[Tuple[int, b
     except Exception as exc:
         raise RuntimeError(
             f"Falha ao converter PDF em imagens (página {len(resultado) + 1}): {exc}. "
-            "Verifique se o poppler está instalado."
+            "Instale o Poppler (Windows: github.com/oschwartz10612/poppler-windows/releases) "
+            "ou execute: pip install pymupdf"
         ) from exc
 
     return resultado
